@@ -56,13 +56,4 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Make package public
-        if: github.event_name != 'pull_request'
-        run: |
-          PKG_NAME=$(echo "${{ github.repository }}" | cut -d'/' -f2)
-          curl -s -X PATCH \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github+json" \
-            -H "Content-Type: application/json" \
-            -d '{"visibility":"public"}' \
-            "https://api.github.com/orgs/${{ github.repository_owner }}/packages/container/${PKG_NAME}" || true
+

@@ -8,6 +8,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -a -o kube-workspaces-proxy ./cmd/proxy/
 
 FROM gcr.io/distroless/static:nonroot
+LABEL org.opencontainers.image.source="https://github.com/kube-workspaces/proxy"
 WORKDIR /
 COPY --from=builder /workspace/kube-workspaces-proxy .
 USER 65532:65532

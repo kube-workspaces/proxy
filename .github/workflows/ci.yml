@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main, working]
+  pull_request:
+    branches: [main, working]
+
+jobs:
+  build:
+    name: Build and Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...

@@ -35,7 +35,7 @@ go run ./cmd/proxy/ --port=8091                       # run locally
 
 ## Docker Image
 
-Published to: `kubeworkspaces/proxy`
+Published to: `ghcr.io/kube-workspaces/proxy`
 
 ## CI
 

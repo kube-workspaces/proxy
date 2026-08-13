@@ -26,7 +26,7 @@ Ingress (/proxy/*)
 │                                                 │
 │  Request Logging → CORS → Auth → Routing        │
 │                                                 │
-│  /healthz, /readyz  → 200 OK                   │
+│  /healthz, /readyz  → 200 OK                    │
 │  /sw.js             → no-op ServiceWorker       │
 │  /proxy/{ns}/{name} → reverse proxy handler     │
 └────────────────────────┬────────────────────────┘

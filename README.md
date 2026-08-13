@@ -1,5 +1,11 @@
 # Kube Workspaces Proxy
 
+[![License](https://img.shields.io/github/license/kube-workspaces/proxy)](https://github.com/kube-workspaces/proxy/blob/main/LICENSE)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/kube-workspaces/proxy)](https://github.com/kube-workspaces/proxy/blob/main/go.mod)
+[![Release](https://img.shields.io/github/v/release/kube-workspaces/proxy)](https://github.com/kube-workspaces/proxy/releases)
+[![CI](https://img.shields.io/github/actions/workflow/status/kube-workspaces/proxy/ci.yml?label=ci)](https://github.com/kube-workspaces/proxy/actions/workflows/ci.yml)
+[![Docker Image](https://img.shields.io/github/actions/workflow/status/kube-workspaces/proxy/docker.yml?label=docker)](https://github.com/kube-workspaces/proxy/actions/workflows/docker.yml)
+
 Reverse proxy service for [Kube Workspaces](https://github.com/kube-workspaces). Routes browser traffic to workspace pods running in Kubernetes, with per-request authentication and namespace-level access control.
 
 ## Overview

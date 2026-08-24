@@ -93,6 +93,8 @@ func main() {
 			RewriteHostAbsolutePaths: cfg.RewriteHostAbsolutePaths,
 			CustomRequestHeaders:     cfg.CustomRequestHeaders,
 			InjectBaseTag:            cfg.InjectBaseTag,
+			Scheme:                   cfg.Scheme,
+			TLSSkipVerify:            cfg.TLSSkipVerify,
 			TLSInsecure:              cfg.TLSInsecure,
 			PreservePathPrefix:       cfg.PreservePathPrefix,
 			AudioPort:                cfg.AudioPort,

@@ -28,7 +28,15 @@ type Config struct {
 	CustomRequestHeaders map[string]string
 	// InjectBaseTag: inject a <base> tag into HTML responses.
 	InjectBaseTag bool
-	// TLSInsecure: connect to backend over HTTPS with skip-verify (for self-signed certs).
+	// Scheme: the URL scheme used to connect to the workspace backend, "http" or
+	// "https". Defaults to "http" when empty.
+	Scheme string
+	// TLSSkipVerify: when connecting over HTTPS, do not verify the backend's
+	// certificate. Required for workspaces serving self-signed certs.
+	TLSSkipVerify bool
+	// TLSInsecure is deprecated: it conflated scheme selection with certificate
+	// verification. Use Scheme ("https") and TLSSkipVerify instead. Still honoured
+	// as a fallback when Scheme is empty, for backwards compatibility.
 	TLSInsecure bool
 	// PreservePathPrefix: forward the full proxy path (including /proxy/{ns}/{name}) to the
 	// workspace pod instead of stripping it. Required for apps configured with a base URL
@@ -42,6 +50,34 @@ type Config struct {
 // ConfigLookup is a function that returns the proxy config for a given workspace image string.
 // Returns nil if no specific config is found (default behavior applies).
 type ConfigLookup func(imageRef string) *Config
+
+// ResolveScheme returns the URL scheme to use for the backend connection.
+// Precedence: explicit Scheme, then the deprecated TLSInsecure flag, then "http".
+func (c *Config) ResolveScheme() string {
+	if c == nil {
+		return "http"
+	}
+	switch strings.ToLower(c.Scheme) {
+	case "https":
+		return "https"
+	case "http":
+		return "http"
+	}
+	// No explicit scheme: fall back to the deprecated combined flag.
+	if c.TLSInsecure {
+		return "https"
+	}
+	return "http"
+}
+
+// ResolveTLSSkipVerify reports whether backend certificate verification should be
+// skipped. The deprecated TLSInsecure flag implies skip-verify.
+func (c *Config) ResolveTLSSkipVerify() bool {
+	if c == nil {
+		return false
+	}
+	return c.TLSSkipVerify || c.TLSInsecure
+}
 
 // WorkspaceImageLookup is a function that returns the container image for a workspace
 // given its namespace and name. Returns empty string if not found.
@@ -146,10 +182,7 @@ func Handler(opts *HandlerOptions) http.Handler {
 			targetPort = cfg.AudioPort
 		}
 		targetHost := fmt.Sprintf("%s.%s.svc.cluster.local:%d", name, namespace, targetPort)
-		scheme := "http"
-		if cfg != nil && cfg.TLSInsecure {
-			scheme = "https"
-		}
+		scheme := cfg.ResolveScheme()
 		target := &url.URL{
 			Scheme: scheme,
 			Host:   targetHost,
@@ -166,7 +199,7 @@ func Handler(opts *HandlerOptions) http.Handler {
 		proxy := &httputil.ReverseProxy{
 			// Use custom transport to skip TLS verification for self-signed certs
 			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: cfg != nil && cfg.TLSInsecure},
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: cfg.ResolveTLSSkipVerify()},
 			},
 			Director: func(req *http.Request) {
 				req.URL.Scheme = target.Scheme

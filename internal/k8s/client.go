@@ -160,9 +160,12 @@ type ImageProxyConfig struct {
 	RewriteHostAbsolutePaths bool
 	CustomRequestHeaders     map[string]string
 	InjectBaseTag            bool
-	TLSInsecure              bool
-	PreservePathPrefix       bool
-	AudioPort                int32
+	Scheme                   string
+	TLSSkipVerify            bool
+	// TLSInsecure is deprecated in favour of Scheme + TLSSkipVerify.
+	TLSInsecure        bool
+	PreservePathPrefix bool
+	AudioPort          int32
 }
 
 // GetImageProxyConfig finds an Image CR by its container image reference and returns its proxy config.
@@ -230,6 +233,8 @@ func extractProxyConfig(obj *unstructured.Unstructured, imageRef string) *ImageP
 		NeedsNoOpSW:              boolField(pc, "needsNoopSW"),
 		RewriteHostAbsolutePaths: boolField(pc, "rewriteHostAbsolutePaths"),
 		InjectBaseTag:            boolField(pc, "injectBaseTag"),
+		Scheme:                   stringField(pc, "scheme"),
+		TLSSkipVerify:            boolField(pc, "tlsSkipVerify"),
 		TLSInsecure:              boolField(pc, "tlsInsecure"),
 		PreservePathPrefix:       boolField(pc, "preservePathPrefix"),
 		AudioPort:                int32Field(pc, "audioPort"),
@@ -286,6 +291,13 @@ func boolField(m map[string]interface{}, key string) bool {
 		return v
 	}
 	return false
+}
+
+func stringField(m map[string]interface{}, key string) string {
+	if v, ok := m[key].(string); ok {
+		return v
+	}
+	return ""
 }
 
 func int32Field(m map[string]interface{}, key string) int32 {

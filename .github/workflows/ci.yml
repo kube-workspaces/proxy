@@ -8,7 +8,7 @@ on:
 
 jobs:
   build:
-    name: Build and Lint
+    name: Build, Vet and Test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -18,9 +18,28 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: "1.26"
+          cache: true
 
       - name: Build
         run: go build ./...
 
       - name: Vet
         run: go vet ./...
+
+      # The repo has had tests since before this workflow existed, but they were
+      # never run in CI. -race because the proxy is heavily concurrent.
+      - name: Test
+        run: go test -race -coverprofile=coverage.out ./...
+
+      - name: Coverage summary
+        if: always()
+        run: |
+          if [ -f coverage.out ]; then
+            {
+              echo '### Coverage'
+              echo
+              echo '```'
+              go tool cover -func=coverage.out | tail -20
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi

@@ -50,6 +50,10 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
+          # linux/amd64 only until now, which broke Apple Silicon and ARM
+          # runners. Buildx was already set up; the platforms list was simply
+          # never passed.
+          platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

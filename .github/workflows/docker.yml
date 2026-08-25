@@ -61,6 +61,11 @@ jobs:
           # runners. Buildx was already set up; the platforms list was simply
           # never passed.
           platforms: linux/amd64,linux/arm64
+          # Compiled into the binary, so a running pod can report what it is.
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

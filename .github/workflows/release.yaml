@@ -61,10 +61,12 @@ jobs:
         id: notes
         run: |
           set -euo pipefail
+          # --version, not just --to HEAD: the notes quote the version in the
+          # upgrade command, and "HEAD" is not installable.
           /tmp/release-notes.sh \
             --repo "${GITHUB_REPOSITORY##*/}" \
             --from "$(git describe --tags --abbrev=0)" \
-            --to HEAD > /tmp/preamble.md
+            --to HEAD --version "${{ inputs.version }}" > /tmp/preamble.md
           cat /tmp/preamble.md
 
       - name: Summary

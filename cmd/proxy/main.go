@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -30,9 +31,34 @@ import (
 	"github.com/kube-workspaces/proxy/internal/proxy"
 )
 
+// Build information, injected at link time:
+//
+//	go build -ldflags "-X main.version=v1.2.3 -X main.commit=abc1234 -X main.buildDate=..."
+//
+// runtime/debug.ReadBuildInfo cannot substitute for this: it reports "(devel)"
+// for a build that is not driven by `go install module@version`, which is the
+// case for the container build.
+var (
+	version   = "dev"
+	commit    = "unknown"
+	buildDate = "unknown"
+)
+
+// versionString renders the build information for logs and the /version endpoint.
+func versionString() string {
+	return fmt.Sprintf("%s (commit %s, built %s, %s/%s, %s)",
+		version, commit, buildDate, runtime.GOOS, runtime.GOARCH, runtime.Version())
+}
+
 func main() {
 	port := flag.Int("port", 8080, "HTTP listen port")
+	showVersion := flag.Bool("version", false, "print version information and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(versionString())
+		return
+	}
 
 	// Override port from env
 	if p := os.Getenv("HTTP_PORT"); p != "" {
@@ -46,7 +72,8 @@ func main() {
 		pathPrefix = "/proxy"
 	}
 
-	log.Printf("Starting kube-workspaces-proxy on :%d", *port)
+	log.Printf("Starting kube-workspaces-proxy %s", versionString())
+	log.Printf("  listening on :%d", *port)
 	log.Printf("  PATH_PREFIX=%q", pathPrefix)
 	log.Printf("  ALLOWED_ORIGINS=%v", allowedOrigins)
 
@@ -116,7 +143,20 @@ func main() {
 		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"status":"ok"}`))
+			// The "status" field is load-bearing: the deployment smoke tests and
+			// the container probes both match on it. Version is additive.
+			fmt.Fprintf(w, `{"status":"ok","version":%q}`, version)
+			return
+		}
+
+		// Build information, so a running pod can be identified without
+		// inspecting the image digest.
+		if r.URL.Path == "/version" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w,
+				`{"version":%q,"commit":%q,"buildDate":%q,"go":%q,"platform":"%s/%s"}`,
+				version, commit, buildDate, runtime.Version(), runtime.GOOS, runtime.GOARCH)
 			return
 		}
 

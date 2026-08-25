@@ -99,6 +99,20 @@ jobs:
             --generate-notes \
             --verify-tag
 
+      # A tag pushed with GITHUB_TOKEN does not trigger other workflows —
+      # GitHub suppresses that to prevent recursion. So the image build has to be
+      # dispatched explicitly, or the release would have no versioned image and
+      # kube-workspaces/deploy would refuse to release against it.
+      - name: Build the release image
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          gh workflow run docker.yml --ref "$VERSION"
+          echo "::notice::dispatched the image build for $VERSION"
+
       - name: Dry run notice
         if: ${{ inputs.dry_run }}
         run: |

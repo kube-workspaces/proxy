@@ -174,9 +174,14 @@ func main() {
 			return
 		}
 
-		// Escaped request recovery via Referer header
+		// Escaped request recovery via Referer header.
+		// Only applies to sub-resource fetches (scripts, images, websockets, etc.)
+		// from within a workspace page. Skip for full-page navigations — when the
+		// browser navigates to a new top-level document (Accept: text/html as the
+		// first preference), the Referer is informational and must not cause the
+		// request to be routed into a workspace.
 		referer := r.Header.Get("Referer")
-		if referer != "" {
+		if referer != "" && !isTopLevelNavigation(r) {
 			proxyPrefix := proxy.ExtractProxyPrefix(referer, pathPrefix)
 			if proxyPrefix != "" {
 				// Validate the path segments look like K8s names before rewriting
@@ -255,6 +260,25 @@ func corsMiddleware(next http.Handler, allowedOrigins []string) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+// isTopLevelNavigation reports whether r is a browser top-level document
+// navigation, as opposed to a sub-resource fetch (script, image, WebSocket,
+// XHR, etc.). It uses the Fetch Metadata headers when present, and falls back
+// to inspecting the Accept header.
+//
+// Escaped-request recovery must not fire for top-level navigations: when the
+// user follows a link from a workspace page to an app route (e.g.
+// /change-password), the Referer still points at the workspace but the
+// request is destined for the app, not the workspace pod.
+func isTopLevelNavigation(r *http.Request) bool {
+	// Fetch Metadata (Sec-Fetch-*) is the authoritative signal in modern browsers.
+	if dest := r.Header.Get("Sec-Fetch-Dest"); dest != "" {
+		return dest == "document"
+	}
+	// Fallback: the browser sends text/html as the top priority for page loads.
+	accept := r.Header.Get("Accept")
+	return strings.HasPrefix(accept, "text/html")
 }
 
 // isValidK8sName checks if a string looks like a valid Kubernetes resource name.

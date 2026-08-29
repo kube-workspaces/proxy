@@ -115,8 +115,16 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          gh workflow run docker.yml --ref "$VERSION"
-          echo "::notice::dispatched the image build for $VERSION"
+          for attempt in 1 2 3 4 5; do
+            if gh workflow run docker.yml --ref "$VERSION"; then
+              echo "::notice::dispatched the image build for $VERSION"
+              exit 0
+            fi
+            echo "dispatch attempt ${attempt}/5 failed; retrying in 5s" >&2
+            sleep 5
+          done
+          echo "::error::could not dispatch docker.yml for $VERSION"
+          exit 1
 
       - name: Dry run notice
         if: ${{ inputs.dry_run }}

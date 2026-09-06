@@ -88,10 +88,10 @@
        ═══════════════════════════════════════════════════ -->
 
   <!-- Browser → Ingress (orange, user traffic) -->
-  <path d="M 200 122 L 400 122 L 400 110 L 517 110" fill="none" stroke="#db6d28" stroke-width="1.5" marker-end="url(#arr-orange)"/>
+  <line x1="200" y1="122" x2="517" y2="122" stroke="#db6d28" stroke-width="1.5" marker-end="url(#arr-orange)"/>
 
   <!-- API → Proxy (dashed blue, issues session tokens / shares auth) -->
-  <path d="M 200 230 L 300 230 L 300 271 L 457 271" fill="none" stroke="#388bfd" stroke-width="1.2" stroke-dasharray="5,3" marker-end="url(#arr-blue-sm)"/>
+  <line x1="200" y1="230" x2="457" y2="230" stroke="#388bfd" stroke-width="1.2" stroke-dasharray="5,3" marker-end="url(#arr-blue-sm)"/>
 
   <!-- API → Dex (dashed purple, auth flow) -->
   <path d="M 111 196 L 111 168 L 111 152" fill="none" stroke="#6e40c9" stroke-width="1.2" stroke-dasharray="5,3" marker-end="url(#arr-purple)"/>

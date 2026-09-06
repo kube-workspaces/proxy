@@ -20,27 +20,7 @@ The proxy sits between the ingress controller and workspace pods, handling:
 
 ## Architecture
 
-```
-Browser
-  │
-  ▼
-Ingress (/proxy/*)
-  │
-  ▼
-┌─────────────────────────────────────────────────┐
-│  Proxy Service (:8080)                          │
-│                                                 │
-│  Request Logging → CORS → Auth → Routing        │
-│                                                 │
-│  /healthz, /readyz  → 200 OK                    │
-│  /sw.js             → no-op ServiceWorker       │
-│  /proxy/{ns}/{name} → reverse proxy handler     │
-└────────────────────────┬────────────────────────┘
-                         │
-                         ▼
-          {name}.{namespace}.svc.cluster.local:80
-                    (Workspace Pod)
-```
+[![Architecture diagram](docs/architecture.svg)](docs/architecture.svg)
 
 ## Request Flow
 

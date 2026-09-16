@@ -49,12 +49,11 @@ func Middleware(provider *ConfigProvider, pathPrefix string) func(http.Handler) 
 				return
 			}
 
-			// Get auth config
+			// Get auth config — deny on unavailable state, never fail-open.
 			cfg, err := provider.GetConfig(ctx)
 			if err != nil {
 				log.Printf("auth: failed to get config: %v", err)
-				// Fail-open for backward compatibility when config can't be loaded
-				next.ServeHTTP(w, r)
+				writeAuthError(w, http.StatusServiceUnavailable, "auth configuration unavailable")
 				return
 			}
 

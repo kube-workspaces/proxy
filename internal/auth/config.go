@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -31,6 +33,11 @@ var (
 		Resource: "secrets",
 	}
 )
+
+// ErrConfigUnavailable reports a genuine failure loading the auth
+// configuration from the cluster. It must never be treated as "auth
+// disabled": a read failure cannot opt the proxy out of authentication.
+var ErrConfigUnavailable = fmt.Errorf("auth config unavailable from cluster")
 
 // AuthConfig holds the resolved authentication configuration needed by the proxy.
 type AuthConfig struct {
@@ -68,11 +75,25 @@ func NewConfigProvider(dynamicClient dynamic.Interface) *ConfigProvider {
 }
 
 // GetConfig returns the current auth configuration, fetching from Kubernetes if the cache is stale.
+// GetConfig returns the current auth configuration, fetching from Kubernetes
+// if the cache is stale. A refresh failure serves the previously-loaded
+// config and triggers a background retry; only a first-load failure is fatal.
+// Failures must never change a working config into pass-through.
 func (p *ConfigProvider) GetConfig(ctx context.Context) (*AuthConfig, error) {
 	p.mu.RLock()
 	if p.config != nil && time.Since(p.lastFetch) < p.cacheDuration {
 		cfg := p.config
 		p.mu.RUnlock()
+		return cfg, nil
+	}
+	if p.config != nil {
+		cfg := p.config
+		p.mu.RUnlock()
+		go func() {
+			if _, err := p.refresh(context.Background()); err != nil {
+				log.Printf("auth: refresh failed; serving cached config: %v", err)
+			}
+		}()
 		return cfg, nil
 	}
 	p.mu.RUnlock()
@@ -91,8 +112,7 @@ func (p *ConfigProvider) refresh(ctx context.Context) (*AuthConfig, error) {
 
 	cfg, err := p.loadFromCluster(ctx)
 	if err != nil {
-		// If we can't load, default to auth disabled (backward compatible)
-		cfg = &AuthConfig{Enabled: false}
+		return nil, fmt.Errorf("%w: %v", ErrConfigUnavailable, err)
 	}
 	p.config = cfg
 	p.lastFetch = time.Now()
@@ -101,8 +121,12 @@ func (p *ConfigProvider) refresh(ctx context.Context) (*AuthConfig, error) {
 
 func (p *ConfigProvider) loadFromCluster(ctx context.Context) (*AuthConfig, error) {
 	obj, err := p.dynamicClient.Resource(authConfigGVR).Get(ctx, "default", metav1.GetOptions{})
-	if err != nil {
+	if apierrors.IsNotFound(err) {
+		// No AuthConfig CR means auth genuinely disabled (opt-in).
 		return &AuthConfig{Enabled: false}, nil
+	}
+	if err != nil {
+		return nil, err
 	}
 
 	cfg := &AuthConfig{Enabled: false}

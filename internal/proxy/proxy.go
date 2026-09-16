@@ -240,6 +240,11 @@ func Handler(opts *HandlerOptions) http.Handler {
 					req.Header.Del("Connection")
 				}
 
+				// Strip platform credentials so they don't reach the guest.
+				// This prevents the guest from seeing the user's session token.
+				req.Header.Del("Authorization")
+				stripPlatformCookie(req)
+
 				// Strip Accept-Encoding so Go's transport auto-decompresses the
 				// response. httputil.ReverseProxy otherwise passes compressed
 				// bytes through raw, which breaks the client.
@@ -459,4 +464,23 @@ func ExtractProxyPrefix(referer, pathPrefix string) string {
 	}
 
 	return ""
+}
+
+// stripPlatformCookie removes the platform session cookie from the request headers
+// to prevent it from being leaked to guest applications.
+func stripPlatformCookie(req *http.Request) {
+	cookies := req.Cookies()
+	if len(cookies) == 0 {
+		return
+	}
+
+	req.Header.Del("Cookie")
+	for _, c := range cookies {
+		// kw-session is the platform token; kw-proxy-prefix is used by the frontend
+		// for recovery and is also platform-specific.
+		if c.Name == "kw-session" || c.Name == "kw-proxy-prefix" {
+			continue
+		}
+		req.AddCookie(c)
+	}
 }

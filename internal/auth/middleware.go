@@ -134,9 +134,41 @@ func Middleware(provider *ConfigProvider, pathPrefix string) func(http.Handler) 
 				return
 			}
 
+			// Enforce editor/admin role for restricted guest API paths (interactive console access)
+			if isRestrictedPath(r.URL.Path, pathPrefix) {
+				if !HasMinimumRole(user.Role, "editor") {
+					writeAuthError(w, http.StatusForbidden, "editor or admin role required for interactive console access")
+					return
+				}
+			}
+
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// isRestrictedPath reports whether path (after stripping prefix) is a guest API
+// path that requires interactive (editor/admin) access. This covers Tier 1
+// transport and management endpoints.
+func isRestrictedPath(path, pathPrefix string) bool {
+	if pathPrefix != "" {
+		path = strings.TrimPrefix(path, pathPrefix)
+	}
+	path = strings.TrimPrefix(path, "/")
+
+	// Expected format: {namespace}/{name}/{rest...}
+	parts := strings.SplitN(path, "/", 3)
+	if len(parts) < 3 {
+		return false
+	}
+	rest := "/" + parts[2]
+
+	// Selkies and other guest agents often use /api/ for their control plane.
+	// /api/health and /api/status are left open for monitoring.
+	if rest == "/api/health" || rest == "/api/status" {
+		return false
+	}
+	return strings.HasPrefix(rest, "/api/")
 }
 
 // extractNamespace extracts the namespace from a proxy request path.

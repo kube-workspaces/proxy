@@ -244,6 +244,21 @@ func UserHasNamespaceAccess(user *UserInfo, namespace string) bool {
 	return false
 }
 
+// HasMinimumRole reports whether role is at least level.
+// Levels: admin > editor > viewer > "".
+func HasMinimumRole(role, level string) bool {
+	if role == "admin" {
+		return true
+	}
+	if role == "editor" {
+		return level == "editor" || level == "viewer" || level == ""
+	}
+	if role == "viewer" {
+		return level == "viewer" || level == ""
+	}
+	return level == ""
+}
+
 func slugifyEmail(email string) string {
 	s := strings.ToLower(email)
 	s = strings.ReplaceAll(s, "@", "-at-")

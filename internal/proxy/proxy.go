@@ -6,9 +6,11 @@ package proxy
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -110,6 +112,9 @@ type HandlerOptions struct {
 	// PathPrefix is the path prefix under which proxy requests are served.
 	// Default is "/proxy" (routes are /proxy/{ns}/{name}/...).
 	PathPrefix string
+	// DisplayAPIURL is a trusted operator-configured API origin, never metadata
+	// or an incoming Host header. Required for the Selkies interactive socket.
+	DisplayAPIURL string
 }
 
 // Handler returns an http.Handler that proxies requests to workspace services.
@@ -144,6 +149,22 @@ func Handler(opts *HandlerOptions) http.Handler {
 		rest := "/"
 		if len(parts) == 3 {
 			rest = "/" + parts[2]
+		}
+		var claim *displayClaim
+		if strings.HasSuffix(rest, "/api/websockets") {
+			if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+				http.Error(w, "WebSocket upgrade required", http.StatusUpgradeRequired); return
+			}
+			api := ""
+			if opts != nil { api = opts.DisplayAPIURL }
+			ctx, cancel := context.WithCancel(r.Context())
+			defer cancel()
+			var status int
+			var err error
+			claim, status, err = acquireDisplay(ctx, api, namespace, name, r.Header, cancel)
+			if err != nil { http.Error(w, err.Error(), status); return }
+			defer claim.close()
+			r = r.WithContext(ctx)
 		}
 
 		// Look up proxy config for this workspace's image
@@ -200,6 +221,11 @@ func Handler(opts *HandlerOptions) http.Handler {
 			// Use custom transport to skip TLS verification for self-signed certs
 			Transport: &http.Transport{
 				TLSClientConfig: &tls.Config{InsecureSkipVerify: cfg.ResolveTLSSkipVerify()},
+				DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+					conn, err := (&net.Dialer{}).DialContext(ctx, network, address)
+					if err == nil && claim != nil { return &displayConn{Conn: conn, claim: claim}, nil }
+					return conn, err
+				},
 			},
 			Director: func(req *http.Request) {
 				req.URL.Scheme = target.Scheme
@@ -243,6 +269,7 @@ func Handler(opts *HandlerOptions) http.Handler {
 				// Strip platform credentials so they don't reach the guest.
 				// This prevents the guest from seeing the user's session token.
 				req.Header.Del("Authorization")
+				req.Header.Del("X-KW-Display-Claim")
 				stripPlatformCookie(req)
 
 				// Strip Accept-Encoding so Go's transport auto-decompresses the
@@ -258,6 +285,11 @@ func Handler(opts *HandlerOptions) http.Handler {
 				}
 			},
 			ModifyResponse: func(resp *http.Response) error {
+				resp.Header.Del("X-KW-Display-Ownership")
+				if claim != nil && resp.StatusCode == http.StatusSwitchingProtocols {
+					if _, valid := claim.validDeadline(); !valid { return fmt.Errorf("display ownership expired during upgrade") }
+					resp.Header.Set("X-KW-Display-Ownership", "1")
+				}
 				// Rewrite Location headers to keep redirects under the proxy prefix.
 				// When preservePathPrefix is true, the app already generates URLs with
 				// the proxy prefix, so we only rewrite absolute URLs pointing to the

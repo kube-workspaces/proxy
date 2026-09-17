@@ -135,6 +135,7 @@ func main() {
 		WorkspaceInfoLookup:  workspaceInfoLookup,
 		ExternalHost:         "", // Not needed — requests come through the main host
 		PathPrefix:           pathPrefix,
+		DisplayAPIURL: os.Getenv("DISPLAY_API_URL"),
 	})
 
 	// Root handler with routing and health check

@@ -37,10 +37,10 @@ type Client struct {
 	dynamic dynamic.Interface
 
 	// Cache for Image CRs (refreshed every 30 seconds)
-	imageCache      []unstructured.Unstructured
-	imageCacheMu    sync.RWMutex
-	imageCacheTime  time.Time
-	imageCacheTTL   time.Duration
+	imageCache     []unstructured.Unstructured
+	imageCacheMu   sync.RWMutex
+	imageCacheTime time.Time
+	imageCacheTTL  time.Duration
 
 	// Cache for workspace image lookups (namespace/name → image ref)
 	wsImageCache    map[string]wsImageEntry

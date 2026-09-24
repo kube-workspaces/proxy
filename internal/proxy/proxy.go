@@ -172,16 +172,22 @@ func Handler(opts *HandlerOptions) http.Handler {
 		var claim *displayClaim
 		if strings.HasSuffix(rest, "/api/websockets") {
 			if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
-				http.Error(w, "WebSocket upgrade required", http.StatusUpgradeRequired); return
+				http.Error(w, "WebSocket upgrade required", http.StatusUpgradeRequired)
+				return
 			}
 			api := ""
-			if opts != nil { api = opts.DisplayAPIURL }
+			if opts != nil {
+				api = opts.DisplayAPIURL
+			}
 			ctx, cancel := context.WithCancel(r.Context())
 			defer cancel()
 			var status int
 			var err error
 			claim, status, err = acquireDisplay(ctx, api, namespace, name, r.Header, cancel)
-			if err != nil { http.Error(w, err.Error(), status); return }
+			if err != nil {
+				http.Error(w, err.Error(), status)
+				return
+			}
 			defer claim.close()
 			r = r.WithContext(ctx)
 		}
@@ -239,7 +245,9 @@ func Handler(opts *HandlerOptions) http.Handler {
 				TLSClientConfig: &tls.Config{InsecureSkipVerify: cfg.ResolveTLSSkipVerify()},
 				DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
 					conn, err := (&net.Dialer{}).DialContext(ctx, network, address)
-					if err == nil && claim != nil { return &displayConn{Conn: conn, claim: claim}, nil }
+					if err == nil && claim != nil {
+						return &displayConn{Conn: conn, claim: claim}, nil
+					}
 					return conn, err
 				},
 			},
@@ -303,7 +311,9 @@ func Handler(opts *HandlerOptions) http.Handler {
 			ModifyResponse: func(resp *http.Response) error {
 				resp.Header.Del("X-KW-Display-Ownership")
 				if claim != nil && resp.StatusCode == http.StatusSwitchingProtocols {
-					if _, valid := claim.validDeadline(); !valid { return fmt.Errorf("display ownership expired during upgrade") }
+					if _, valid := claim.validDeadline(); !valid {
+						return fmt.Errorf("display ownership expired during upgrade")
+					}
 					resp.Header.Set("X-KW-Display-Ownership", "1")
 				}
 				// Rewrite Location headers to keep redirects under the proxy prefix.

@@ -42,7 +42,7 @@ var ErrConfigUnavailable = fmt.Errorf("auth config unavailable from cluster")
 // AuthConfig holds the resolved authentication configuration needed by the proxy.
 type AuthConfig struct {
 	Enabled     bool
-	SigningKey   []byte
+	SigningKey  []byte
 	AdminEmails []string
 }
 

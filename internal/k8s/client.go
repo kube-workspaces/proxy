@@ -166,6 +166,8 @@ type ImageProxyConfig struct {
 	TLSInsecure        bool
 	PreservePathPrefix bool
 	AudioPort          int32
+	// Port: the workspace Service port to proxy to. 0 means default 80.
+	Port int32
 }
 
 // GetImageProxyConfig finds an Image CR by its container image reference and returns its proxy config.
@@ -238,6 +240,7 @@ func extractProxyConfig(obj *unstructured.Unstructured, imageRef string) *ImageP
 		TLSInsecure:              boolField(pc, "tlsInsecure"),
 		PreservePathPrefix:       boolField(pc, "preservePathPrefix"),
 		AudioPort:                int32Field(pc, "audioPort"),
+		Port:                     int32Field(pc, "port"),
 	}
 
 	if paths, ok := pc["websocketPaths"].([]interface{}); ok {

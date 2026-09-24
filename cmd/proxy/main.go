@@ -125,6 +125,7 @@ func main() {
 			TLSInsecure:              cfg.TLSInsecure,
 			PreservePathPrefix:       cfg.PreservePathPrefix,
 			AudioPort:                cfg.AudioPort,
+			Port:                     cfg.Port,
 		}
 	}
 

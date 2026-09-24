@@ -47,11 +47,29 @@ type Config struct {
 	// AudioPort: if set, requests to /audio/ are routed to this port instead of the
 	// workspace's default port. Used for images with a separate audio WebSocket service.
 	AudioPort int32
+	// Port: the workspace Service port to proxy to. When 0 (unset), defaults to
+	// 80, the standard workspace Service port that the controller maps to the
+	// image's primary guest port.
+	Port int32
 }
 
 // ConfigLookup is a function that returns the proxy config for a given workspace image string.
 // Returns nil if no specific config is found (default behavior applies).
 type ConfigLookup func(imageRef string) *Config
+
+// resolveTargetPort picks the backend Service port for a request against the
+// given workspace rest path. Audio requests use the configured audio port when
+// present; any configured port applies to all other traffic. Falls back to 80,
+// the standard workspace Service port.
+func resolveTargetPort(cfg *Config, rest string) int32 {
+	if cfg != nil && cfg.AudioPort > 0 && (rest == "/audio/" || strings.HasPrefix(rest, "/audio/")) {
+		return cfg.AudioPort
+	}
+	if cfg != nil && cfg.Port > 0 {
+		return cfg.Port
+	}
+	return 80
+}
 
 // ResolveScheme returns the URL scheme to use for the backend connection.
 // Precedence: explicit Scheme, then the deprecated TLSInsecure flag, then "http".
@@ -119,7 +137,8 @@ type HandlerOptions struct {
 
 // Handler returns an http.Handler that proxies requests to workspace services.
 // URL pattern: {prefix}/{namespace}/{name}/{rest...}
-// Proxies to: http://{name}.{namespace}.svc.cluster.local:80/{rest...}
+// Proxies to: http://{name}.{namespace}.svc.cluster.local:{port}/{rest...}
+// where {port} is the image proxyConfig port (default 80).
 //
 // Supports WebSocket upgrade transparently via httputil.ReverseProxy.
 // Applies per-image proxy configuration when available.
@@ -195,13 +214,10 @@ func Handler(opts *HandlerOptions) http.Handler {
 			cfg.PreservePathPrefix = *wsPreservePathPrefix
 		}
 
-		// Build target URL
-		// Always specify :80 explicitly so that https scheme doesn't default to port 443.
-		targetPort := int32(80)
-		// Route audio requests to the audio port if configured
-		if cfg != nil && cfg.AudioPort > 0 && (rest == "/audio/" || strings.HasPrefix(rest, "/audio/")) {
-			targetPort = cfg.AudioPort
-		}
+		// Build target URL.
+		// Always specify the port explicitly so that https scheme doesn't
+		// default to port 443.
+		targetPort := resolveTargetPort(cfg, rest)
 		targetHost := fmt.Sprintf("%s.%s.svc.cluster.local:%d", name, namespace, targetPort)
 		scheme := cfg.ResolveScheme()
 		target := &url.URL{

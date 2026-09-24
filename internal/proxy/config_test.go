@@ -68,3 +68,32 @@ func TestSecureHTTPSIsExpressible(t *testing.T) {
 		t.Error("TLSSkipVerify should be false: HTTPS with a valid CA must verify certs")
 	}
 }
+
+func TestResolveTargetPort(t *testing.T) {
+	defaultPort := int32(80)
+	cfgPort := int32(8080)
+	audioPort := int32(8443)
+
+	tests := []struct {
+		name string
+		cfg  *Config
+		rest string
+		want int32
+	}{
+		{"nil config defaults to 80", nil, "/", defaultPort},
+		{"empty config defaults to 80", &Config{}, "/", defaultPort},
+		{"configured port applies", &Config{Port: cfgPort}, "/", cfgPort},
+		{"configured port applies to ws path", &Config{Port: cfgPort}, "/websockify", cfgPort},
+		{"audio path uses audio port", &Config{AudioPort: audioPort}, "/audio/", audioPort},
+		{"audio path uses audio port over configured port", &Config{Port: cfgPort, AudioPort: audioPort}, "/audio/stream", audioPort},
+		{"non-audio path ignores audio port", &Config{AudioPort: audioPort}, "/", defaultPort},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resolveTargetPort(tt.cfg, tt.rest); got != tt.want {
+				t.Errorf("resolveTargetPort() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}

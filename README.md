@@ -16,7 +16,7 @@ The proxy sits between the ingress controller and workspace pods, handling:
 - **Authorization** — checks namespace access per request via User CRs (no caching = instant revocation)
 - **Reverse proxying** — routes to workspace Services via cluster DNS
 - **Protocol support** — HTTP, WebSocket, and SSE passthrough
-- **Per-image behavior** — TLS backends, path prefix preservation, HTML rewriting, audio port routing
+- **Per-image behavior** — configurable backend port, TLS backends, path prefix preservation, HTML rewriting, audio port routing
 
 ## Architecture
 
@@ -111,6 +111,22 @@ Backend:  /file.js
 Request:  /proxy/team/my-code/file.js
 Backend:  /proxy/team/my-code/file.js
 ```
+
+### Backend Port
+
+By default the proxy targets the workspace Service port `80` (which the
+controller maps to the image's primary guest port). An Image CR can set
+`spec.proxyConfig.port` to route non-audio traffic at a different workspace
+Service port — e.g. a web app exposed via an additional Service port alongside
+SSH on the primary:
+
+```
+# spec.proxyConfig.port: 8080
+Request:  /proxy/team/my-app/
+Backend:  http://my-app.team.svc.cluster.local:8080/
+```
+
+`audioPort` still wins for `/audio/` paths. Unset (`0`) keeps the default 80.
 
 ### Audio Port Routing
 

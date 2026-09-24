@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -62,7 +63,11 @@ func main() {
 
 	// Override port from env
 	if p := os.Getenv("HTTP_PORT"); p != "" {
-		fmt.Sscanf(p, "%d", port)
+		parsed, err := strconv.Atoi(p)
+		if err != nil || parsed < 1 || parsed > 65535 {
+			log.Fatalf("invalid HTTP_PORT %q: must be a port number between 1 and 65535", p)
+		}
+		*port = parsed
 	}
 
 	// Configuration from environment
@@ -136,7 +141,7 @@ func main() {
 		WorkspaceInfoLookup:  workspaceInfoLookup,
 		ExternalHost:         "", // Not needed — requests come through the main host
 		PathPrefix:           pathPrefix,
-		DisplayAPIURL: os.Getenv("DISPLAY_API_URL"),
+		DisplayAPIURL:        os.Getenv("DISPLAY_API_URL"),
 	})
 
 	// Root handler with routing and health check
@@ -214,11 +219,15 @@ func main() {
 	handler := requestLoggingMiddleware(corsHandler)
 
 	server := &http.Server{
-		Addr:         fmt.Sprintf(":%d", *port),
-		Handler:      handler,
-		ReadTimeout:  0, // No timeout for WebSocket/streaming
-		WriteTimeout: 0, // No timeout for WebSocket/streaming
-		IdleTimeout:  120 * time.Second,
+		Addr:    fmt.Sprintf(":%d", *port),
+		Handler: handler,
+		// ReadHeaderTimeout bounds the initial header read so a slow or idle
+		// client cannot hold a connection open indefinitely, while ReadTimeout/
+		// WriteTimeout stay 0 for WebSocket and streaming responses.
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       0, // No timeout for WebSocket/streaming
+		WriteTimeout:      0, // No timeout for WebSocket/streaming
+		IdleTimeout:       120 * time.Second,
 	}
 
 	// Graceful shutdown

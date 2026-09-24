@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -11,6 +12,14 @@ const (
 	// SessionCookieName is the name of the session cookie.
 	SessionCookieName = "kw-session"
 )
+
+// ConfigReader abstracts the auth configuration and user lookups the
+// middleware needs, so tests can substitute a mock. *ConfigProvider
+// implements it.
+type ConfigReader interface {
+	GetConfig(ctx context.Context) (*AuthConfig, error)
+	GetUserByEmail(ctx context.Context, email string) (*UserInfo, error)
+}
 
 // Middleware creates an HTTP middleware that validates session tokens and checks
 // namespace access before allowing proxy requests through.
@@ -26,7 +35,7 @@ const (
 //   - User disabled → 403 Forbidden
 //   - No namespace access → 403 Forbidden
 //   - Valid token + access → pass through
-func Middleware(provider *ConfigProvider, pathPrefix string) func(http.Handler) http.Handler {
+func Middleware(provider ConfigReader, pathPrefix string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ctx := r.Context()

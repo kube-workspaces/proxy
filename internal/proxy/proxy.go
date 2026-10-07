@@ -47,6 +47,10 @@ type Config struct {
 	// AudioPort: if set, requests to /audio/ are routed to this port instead of the
 	// workspace's default port. Used for images with a separate audio WebSocket service.
 	AudioPort int32
+	// AgentPort: if set, requests to /agent/ upgrade to WebSocket and bridge
+	// to the guest workspace-agent's TCP listener on this Service port. When
+	// 0 (unset) the agent route refuses with 503 — transport is never assumed.
+	AgentPort int32
 	// Port: the workspace Service port to proxy to. When 0 (unset), defaults to
 	// 80, the standard workspace Service port that the controller maps to the
 	// image's primary guest port.
@@ -133,6 +137,12 @@ type HandlerOptions struct {
 	// DisplayAPIURL is a trusted operator-configured API origin, never metadata
 	// or an incoming Host header. Required for the Selkies interactive socket.
 	DisplayAPIURL string
+	// AgentAPIURL is the trusted operator-configured API origin for agent
+	// ticket attach/renew/release. Required for the /agent/ bridge.
+	AgentAPIURL string
+	// AgentDial opens the guest agent TCP connection. Defaults to the
+	// workspace Service address; overridable for tests and embedded use.
+	AgentDial func(ctx context.Context, ns, name string, port int32) (net.Conn, error)
 }
 
 // Handler returns an http.Handler that proxies requests to workspace services.
@@ -147,9 +157,11 @@ func Handler(opts *HandlerOptions) http.Handler {
 	if opts != nil {
 		prefix = strings.TrimSuffix(opts.PathPrefix, "/")
 	}
+	// Shared single-session registry for the agent bridge: one held session
+	// per workspace across all requests served by this handler.
+	agents := &agentRegistry{}
 
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Strip prefix to get /{namespace}/{name}/{rest...}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { // Strip prefix to get /{namespace}/{name}/{rest...}
 		path := r.URL.Path
 		if prefix != "" {
 			path = strings.TrimPrefix(path, prefix)
@@ -168,6 +180,52 @@ func Handler(opts *HandlerOptions) http.Handler {
 		rest := "/"
 		if len(parts) == 3 {
 			rest = "/" + parts[2]
+		}
+		// Agent transport bridge: WebSocket at the edge, framed TCP inside.
+		// Handled before image-config lookup so an unconfigured image fails
+		// honestly instead of falling through to the app proxy.
+		if rest == "/agent/" || strings.HasPrefix(rest, "/agent/") {
+			agentPort, agentAPI := int32(0), ""
+			if opts != nil {
+				agentAPI = opts.AgentAPIURL
+			}
+			// Look up the image config for the agent port without failing
+			// the whole request when the workspace is unknown: unknown
+			// workspaces fail closed below via the API ticket call.
+			var imageRef string
+			if opts != nil {
+				if opts.WorkspaceInfoLookup != nil {
+					if info := opts.WorkspaceInfoLookup(namespace, name); info != nil {
+						imageRef = info.Image
+					}
+				} else if opts.WorkspaceImageLookup != nil {
+					imageRef = opts.WorkspaceImageLookup(namespace, name)
+				}
+				if imageRef != "" && opts.ConfigLookup != nil {
+					if cfg := opts.ConfigLookup(imageRef); cfg != nil {
+						agentPort = cfg.AgentPort
+					}
+				}
+			}
+			if agentPort <= 0 {
+				http.Error(w, `{"error":"agent transport not configured for this image"}`, http.StatusServiceUnavailable)
+				return
+			}
+			deps := &agentDeps{
+				API:      agentAPI,
+				Registry: agents,
+				Credential: func(r *http.Request) string {
+					if cookie, err := r.Cookie("kw-session"); err == nil && cookie.Value != "" {
+						return "Bearer " + cookie.Value
+					}
+					return r.Header.Get("Authorization")
+				},
+			}
+			if opts != nil && opts.AgentDial != nil {
+				deps.DialAgent = opts.AgentDial
+			}
+			serveAgent(deps, w, r, namespace, name, agentPort)
+			return
 		}
 		var claim *displayClaim
 		if strings.HasSuffix(rest, "/api/websockets") {

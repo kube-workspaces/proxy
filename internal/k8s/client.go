@@ -166,6 +166,10 @@ type ImageProxyConfig struct {
 	TLSInsecure        bool
 	PreservePathPrefix bool
 	AudioPort          int32
+	// AgentPort: the workspace Service port serving the guest workspace-agent
+	// TCP listener. 0 means the image has no agent transport: the /agent/
+	// route refuses with 503 rather than assuming a port.
+	AgentPort int32
 	// Port: the workspace Service port to proxy to. 0 means default 80.
 	Port int32
 }
@@ -240,6 +244,7 @@ func extractProxyConfig(obj *unstructured.Unstructured, imageRef string) *ImageP
 		TLSInsecure:              boolField(pc, "tlsInsecure"),
 		PreservePathPrefix:       boolField(pc, "preservePathPrefix"),
 		AudioPort:                int32Field(pc, "audioPort"),
+		AgentPort:                int32Field(pc, "agentPort"),
 		Port:                     int32Field(pc, "port"),
 	}
 

@@ -130,6 +130,7 @@ func main() {
 			TLSInsecure:              cfg.TLSInsecure,
 			PreservePathPrefix:       cfg.PreservePathPrefix,
 			AudioPort:                cfg.AudioPort,
+			AgentPort:                cfg.AgentPort,
 			Port:                     cfg.Port,
 		}
 	}
@@ -142,6 +143,7 @@ func main() {
 		ExternalHost:         "", // Not needed — requests come through the main host
 		PathPrefix:           pathPrefix,
 		DisplayAPIURL:        os.Getenv("DISPLAY_API_URL"),
+		AgentAPIURL:          os.Getenv("AGENT_API_URL"),
 	})
 
 	// Root handler with routing and health check

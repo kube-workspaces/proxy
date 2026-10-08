@@ -42,6 +42,22 @@ func fakeAgentAPI(t *testing.T, refuseAttach bool, counters *agentCounters) *htt
 			action = r.URL.Path[i+1:]
 		}
 		w.Header().Set("Content-Type", "application/json")
+		// Mirror the real API contract: these POSTs require a JSON body
+		// (Goa rejects bodiless posts with missing-payload). The fake
+		// enforces it so the client can never regress to nil bodies.
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		if ct := r.Header.Get("Content-Type"); ct != "application/json" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 65536)).Decode(&payload); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
 		switch action {
 		case "attach":
 			counters.attaches.Add(1)
@@ -56,6 +72,10 @@ func fakeAgentAPI(t *testing.T, refuseAttach bool, counters *agentCounters) *htt
 			counters.renews.Add(1)
 			if r.Header.Get("X-KW-Agent-Session") != "sess-test-1" {
 				w.WriteHeader(http.StatusConflict)
+				return
+			}
+			if payload["session_id"] != "sess-test-1" {
+				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
 			json.NewEncoder(w).Encode(map[string]any{"ttl_ms": 60000, "protocol": 1})

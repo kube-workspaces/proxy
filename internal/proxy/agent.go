@@ -130,10 +130,23 @@ func (d *agentDeps) agentCall(ctx context.Context, action, api, ns, name string,
 		return ticket, http.StatusServiceUnavailable, errors.New("agent ticket API is not configured")
 	}
 	endpoint := strings.TrimRight(api, "/") + "/v1/workspaces/" + url.PathEscape(name) + "/agent/" + action + "?namespace=" + url.QueryEscape(ns)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
+	// The API requires a JSON body on these POSTs (Goa rejects bodiless
+	// posts with missing-payload before auth/binding): {} for attach
+	// (name arrives via the path), session correlation for renew/release
+	// (mirrored in the X-KW-Agent-Session header per the API contract).
+	body := `{}`
+	if session != "" && action != "attach" {
+		encoded, err := json.Marshal(map[string]string{"session_id": session})
+		if err != nil {
+			return ticket, http.StatusServiceUnavailable, err
+		}
+		body = string(encoded)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(body))
 	if err != nil {
 		return ticket, http.StatusServiceUnavailable, err
 	}
+	req.Header.Set("Content-Type", "application/json")
 	if d.Credential != nil {
 		if credential := d.Credential(&http.Request{Header: headers}); credential != "" {
 			req.Header.Set("Authorization", credential)

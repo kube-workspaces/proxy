@@ -273,6 +273,13 @@ func dialAuth(t *testing.T, wsURL string) (*websocket.Conn, error) {
 	return websocket.DialConfig(config)
 }
 
+func TestWSAcceptKeyMatchesRFC6455Vector(t *testing.T) {
+	// RFC 6455 §1.3 example: SHA-1 (not SHA-256) over key + GUID.
+	if got := wsAcceptKey("dGhlIHNhbXBsZSBub25jZQ=="); got != "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=" {
+		t.Fatalf("accept = %q, want RFC 6455 example", got)
+	}
+}
+
 func rawUpgradeStatus(t *testing.T, addr, path string) string {
 	t.Helper()
 	conn, err := net.Dial("tcp", addr)

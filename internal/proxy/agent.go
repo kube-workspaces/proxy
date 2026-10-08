@@ -14,7 +14,10 @@ package proxy
 // the route refuses with 503 — never silently, never assumed.
 
 import (
+	"bufio"
 	"context"
+	"crypto/sha1"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -26,8 +29,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"golang.org/x/net/websocket"
 )
 
 const (
@@ -205,14 +206,140 @@ func agentFrame(reader io.Reader) (tag byte, body []byte, err error) {
 	return header[0], body, nil
 }
 
-// agentWSFrame wraps one agent frame (tag+len+body) for the wire.
-func agentWSFrame(tag byte, body []byte) []byte {
-	frame := make([]byte, 0, len(body)+5)
-	frame = append(frame, tag)
-	length := make([]byte, 4)
-	binary.BigEndian.PutUint32(length, uint32(len(body)))
-	frame = append(frame, length...)
-	return append(frame, body...)
+// agentWSConn is a minimal WebSocket server endpoint over a hijacked
+// connection. x/net/websocket requires a raw http.Hijacker and panics behind
+// the proxy's status-capturing middleware wrappers; manual framing hijacks
+// through http.ResponseController (which traverses Unwrap) instead. Server
+// messages go out unmasked; client messages must arrive masked.
+type agentWSConn struct {
+	conn net.Conn
+	br   *bufio.Reader
+	mu   sync.Mutex
+}
+
+const agentWSGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+// agentWSUpgrade validates the handshake request, hijacks the connection and
+// writes the 101 response. No mitigation beyond the platform auth already
+// enforced upstream: the bridge admits exactly one held session per
+// workspace and the API ticket gate runs before this point.
+func agentWSUpgrade(w http.ResponseWriter, r *http.Request) (*agentWSConn, error) {
+	key := r.Header.Get("Sec-WebSocket-Key")
+	if key == "" {
+		return nil, errors.New("missing Sec-WebSocket-Key")
+	}
+	accept := wsAcceptKey(key)
+	conn, readWriter, err := http.NewResponseController(w).Hijack()
+	if err != nil {
+		return nil, err
+	}
+	response := "HTTP/1.1 101 Switching Protocols\r\n" +
+		"Upgrade: websocket\r\n" +
+		"Connection: Upgrade\r\n" +
+		"Sec-WebSocket-Accept: " + accept + "\r\n\r\n"
+	if _, err := conn.Write([]byte(response)); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return &agentWSConn{conn: conn, br: readWriter.Reader}, nil
+}
+
+func wsAcceptKey(key string) string {
+	// RFC 6455 §1.3: SHA-1 (not SHA-256) over the client key + GUID.
+	sum := sha1.Sum([]byte(key + agentWSGUID))
+	return base64.StdEncoding.EncodeToString(sum[:])
+}
+
+// readMessage returns one complete binary message. Fragmented, text and
+// oversized messages terminate the session (the agent protocol already
+// frames its own units; reassembly is not negotiated here). Ping is
+// answered; close terminates.
+func (c *agentWSConn) readMessage() ([]byte, error) {
+	header := make([]byte, 2)
+	if _, err := io.ReadFull(c.br, header); err != nil {
+		return nil, err
+	}
+	fin := header[0]&0x80 != 0
+	opcode := header[0] & 0x0F
+	masked := header[1]&0x80 != 0
+	length := int64(header[1] & 0x7F)
+	switch length {
+	case 126:
+		ext := make([]byte, 2)
+		if _, err := io.ReadFull(c.br, ext); err != nil {
+			return nil, err
+		}
+		length = int64(binary.BigEndian.Uint16(ext))
+	case 127:
+		ext := make([]byte, 8)
+		if _, err := io.ReadFull(c.br, ext); err != nil {
+			return nil, err
+		}
+		length = int64(binary.BigEndian.Uint64(ext))
+	}
+	if length < 0 || length > agentMaxMedia+5 {
+		return nil, fmt.Errorf("message size %d outside caps", length)
+	}
+	// Clients must mask; servers must not.
+	if !masked {
+		return nil, errors.New("unmasked client frame")
+	}
+	mask := make([]byte, 4)
+	if _, err := io.ReadFull(c.br, mask); err != nil {
+		return nil, err
+	}
+	payload := make([]byte, length)
+	if _, err := io.ReadFull(c.br, payload); err != nil {
+		return nil, err
+	}
+	for i := range payload {
+		payload[i] ^= mask[i%4]
+	}
+	switch opcode {
+	case 0x2:
+		if !fin {
+			return nil, errors.New("fragmented messages unsupported")
+		}
+		return payload, nil
+	case 0x8:
+		return nil, io.EOF
+	case 0x9:
+		_ = c.writeFrame(0xA, payload)
+		return c.readMessage()
+	case 0xA:
+		return c.readMessage()
+	default:
+		return nil, fmt.Errorf("unsupported opcode %d", opcode)
+	}
+}
+
+// writeMessage sends one binary message (single frame, unmasked).
+func (c *agentWSConn) writeMessage(payload []byte) error {
+	return c.writeFrame(0x2, payload)
+}
+
+func (c *agentWSConn) writeFrame(opcode byte, payload []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	header := []byte{0x80 | opcode}
+	length := len(payload)
+	switch {
+	case length <= 125:
+		header = append(header, byte(length))
+	case length <= 65535:
+		header = append(header, 126, byte(length>>8), byte(length))
+	default:
+		header = append(header, 127, 0, 0, 0, 0, byte(length>>24), byte(length>>16), byte(length>>8), byte(length))
+	}
+	if _, err := c.conn.Write(header); err != nil {
+		return err
+	}
+	_, err := c.conn.Write(payload)
+	return err
+}
+
+func (c *agentWSConn) close() error {
+	return c.conn.Close()
 }
 
 // serveAgent bridges one WebSocket viewer to one guest agent TCP session.
@@ -240,55 +367,63 @@ func serveAgent(deps *agentDeps, w http.ResponseWriter, r *http.Request, ns, nam
 	defer renewCancel()
 	go agentRenewLoop(renewCtx, deps, ns, name, r.Header, ticket)
 
-	websocket.Server{
-		Handshake: func(*websocket.Config, *http.Request) error { return nil },
-		Handler: func(ws *websocket.Conn) {
-			defer cancel()
-			defer agentRelease(context.Background(), deps, ns, name, r.Header, ticket.ID)
-			guest, err := deps.dial(ctx, ns, name, port)
-			if err != nil {
-				_ = ws.Close()
-				return
-			}
+	ws, err := agentWSUpgrade(w, r)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+	func() {
+		defer cancel()
+		defer agentRelease(context.Background(), deps, ns, name, r.Header, ticket.ID)
+		guest, err := deps.dial(ctx, ns, name, port)
+		if err != nil {
+			_ = ws.close()
+			return
+		}
+		defer guest.Close()
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
 			defer guest.Close()
-			var wg sync.WaitGroup
-			wg.Add(2)
-			go func() {
-				defer wg.Done()
-				defer guest.Close()
-				var message []byte
-				for {
-					if err := websocket.Message.Receive(ws, &message); err != nil {
-						return
-					}
-					if len(message) < 5 || len(message)-5 > agentMaxMedia {
-						return
-					}
-					if _, err := guest.Write(message); err != nil {
-						return
-					}
-					bridge.framesToGuest++
-					bridge.bytesToGuest += int64(len(message))
+			for {
+				message, err := ws.readMessage()
+				if err != nil {
+					return
 				}
-			}()
-			go func() {
-				defer wg.Done()
-				defer ws.Close()
-				for {
-					tag, body, err := agentFrame(guest)
-					if err != nil {
-						return
-					}
-					if err := websocket.Message.Send(ws, agentWSFrame(tag, body)); err != nil {
-						return
-					}
-					bridge.framesToViewer++
-					bridge.bytesToViewer += int64(len(body) + 5)
+				if len(message) < 5 || len(message)-5 > agentMaxMedia {
+					return
 				}
-			}()
-			wg.Wait()
-		},
-	}.ServeHTTP(w, r)
+				if _, err := guest.Write(message); err != nil {
+					return
+				}
+				bridge.framesToGuest++
+				bridge.bytesToGuest += int64(len(message))
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			defer ws.close()
+			for {
+				tag, body, err := agentFrame(guest)
+				if err != nil {
+					return
+				}
+				frame := make([]byte, 0, len(body)+5)
+				frame = append(frame, tag)
+				length := make([]byte, 4)
+				binary.BigEndian.PutUint32(length, uint32(len(body)))
+				frame = append(frame, length...)
+				frame = append(frame, body...)
+				if err := ws.writeMessage(frame); err != nil {
+					return
+				}
+				bridge.framesToViewer++
+				bridge.bytesToViewer += int64(len(body) + 5)
+			}
+		}()
+		wg.Wait()
+	}()
 	close(bridge.done)
 }
 

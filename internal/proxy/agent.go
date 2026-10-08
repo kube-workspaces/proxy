@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -118,7 +119,9 @@ func (d *agentDeps) dial(ctx context.Context, ns, name string, port int32) (net.
 		return d.DialAgent(ctx, ns, name, port)
 	}
 	address := fmt.Sprintf("%s.%s.svc.cluster.local:%d", name, ns, port)
-	dialer := &net.Dialer{}
+	// Bounded: an unreachable guest must fail the bridge fast (502/close),
+	// never wedge it until the viewer gives up.
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
 	return dialer.DialContext(ctx, "tcp", address)
 }
 
@@ -377,6 +380,7 @@ func serveAgent(deps *agentDeps, w http.ResponseWriter, r *http.Request, ns, nam
 		defer agentRelease(context.Background(), deps, ns, name, r.Header, ticket.ID)
 		guest, err := deps.dial(ctx, ns, name, port)
 		if err != nil {
+			log.Printf("agent bridge %s/%s: guest dial failed: %v", ns, name, err)
 			_ = ws.close()
 			return
 		}

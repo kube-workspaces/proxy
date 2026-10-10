@@ -83,14 +83,129 @@ func (r *agentRegistry) release(ns, name string, bridge *agentBridge) {
 	}
 }
 
-// agentBridge is one held session: counters for the telemetry the indicator
-// contract requires (API/proxy/client/guest must agree on usage).
+// Disconnect reasons recorded on the bridge snapshot (Layer 2 of the
+// transport indicator contract). They describe how the session ended, never
+// user content.
+const (
+	agentEndGuestUnreachable = "guest-unreachable"
+	agentEndViewerClosed     = "viewer-closed"
+	agentEndGuestClosed      = "guest-closed"
+	agentEndViewerRejected   = "viewer-frame-rejected"
+	agentEndGuestWriteFailed = "guest-write-failed"
+	agentEndViewWriteFailed  = "viewer-write-failed"
+)
+
+// agentSnapshot is a point-in-time copy of one held session: attach time,
+// control/media bytes and frames in both directions, and (once ended) how
+// the session ended. An ended session with zero media bytes is a
+// failed-attach, never usage. There is intentionally no HTTP route serving
+// these yet; the snapshot is the in-process API a future status consumer
+// reads.
+type agentSnapshot struct {
+	AttachedAt       time.Time
+	EndedAt          time.Time
+	DisconnectReason string
+	ControlToGuest   int64
+	MediaToGuest     int64
+	ControlToViewer  int64
+	MediaToViewer    int64
+	FramesToGuest    int64
+	FramesToViewer   int64
+}
+
+// Active reports whether the session still holds the seat.
+func (s agentSnapshot) Active() bool { return s.DisconnectReason == "" }
+
+// MediaBytes totals media (non-control) bytes in both directions.
+func (s agentSnapshot) MediaBytes() int64 { return s.MediaToGuest + s.MediaToViewer }
+
+// agentBridge is one held session: mutex-guarded counters for the telemetry
+// the indicator contract requires (API/proxy/client/guest must agree on
+// usage). Both copy goroutines update it; readers take Snapshot.
 type agentBridge struct {
-	bytesToGuest   int64
-	bytesToViewer  int64
+	mu             sync.Mutex
+	attachedAt     time.Time
+	endedAt        time.Time
+	endReason      string
+	controlToGuest int64
+	mediaToGuest   int64
+	controlToView  int64
+	mediaToView    int64
 	framesToGuest  int64
-	framesToViewer int64
+	framesToView   int64
 	done           chan struct{}
+}
+
+// newAgentBridge holds a session starting now.
+func newAgentBridge(now time.Time) *agentBridge {
+	return &agentBridge{attachedAt: now, done: make(chan struct{})}
+}
+
+// addViewerFrame accounts one viewer→guest message by its wire tag
+// (0x00 control, anything else media). Callers must have validated the
+// 5-byte framed header already.
+func (b *agentBridge) addViewerFrame(tag byte, n int64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if tag == agentTagControl {
+		b.controlToGuest += n
+	} else {
+		b.mediaToGuest += n
+	}
+	b.framesToGuest++
+}
+
+// addGuestFrame accounts one guest→viewer frame by its wire tag.
+func (b *agentBridge) addGuestFrame(tag byte, n int64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if tag == agentTagControl {
+		b.controlToView += n
+	} else {
+		b.mediaToView += n
+	}
+	b.framesToView++
+}
+
+// finish records how the session ended. First reason wins: the copy loop
+// that detects the failure owns the verdict, not a racing teardown.
+func (b *agentBridge) finish(now time.Time, reason string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.endReason != "" {
+		return
+	}
+	b.endReason = reason
+	b.endedAt = now
+}
+
+// Snapshot copies the current counters.
+func (b *agentBridge) Snapshot() agentSnapshot {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return agentSnapshot{
+		AttachedAt:       b.attachedAt,
+		EndedAt:          b.endedAt,
+		DisconnectReason: b.endReason,
+		ControlToGuest:   b.controlToGuest,
+		MediaToGuest:     b.mediaToGuest,
+		ControlToViewer:  b.controlToView,
+		MediaToViewer:    b.mediaToView,
+		FramesToGuest:    b.framesToGuest,
+		FramesToViewer:   b.framesToView,
+	}
+}
+
+// snapshot returns the held session's counters, or false when no session
+// holds the seat.
+func (r *agentRegistry) snapshot(ns, name string) (agentSnapshot, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	bridge, ok := r.sessions[r.key(ns, name)]
+	if !ok {
+		return agentSnapshot{}, false
+	}
+	return bridge.Snapshot(), true
 }
 
 // agentDeps wires the bridge to its surroundings for tests.
@@ -352,7 +467,7 @@ func serveAgent(deps *agentDeps, w http.ResponseWriter, r *http.Request, ns, nam
 		return
 	}
 	registry := deps.registry()
-	bridge := &agentBridge{done: make(chan struct{})}
+	bridge := newAgentBridge(time.Now())
 	if !registry.tryHold(ns, name, bridge) {
 		http.Error(w, `{"error":"agent session busy"}`, http.StatusConflict)
 		return
@@ -381,6 +496,7 @@ func serveAgent(deps *agentDeps, w http.ResponseWriter, r *http.Request, ns, nam
 		guest, err := deps.dial(ctx, ns, name, port)
 		if err != nil {
 			log.Printf("agent bridge %s/%s: guest dial failed: %v", ns, name, err)
+			bridge.finish(time.Now(), agentEndGuestUnreachable)
 			_ = ws.close()
 			return
 		}
@@ -393,16 +509,18 @@ func serveAgent(deps *agentDeps, w http.ResponseWriter, r *http.Request, ns, nam
 			for {
 				message, err := ws.readMessage()
 				if err != nil {
+					bridge.finish(time.Now(), agentEndViewerClosed)
 					return
 				}
 				if len(message) < 5 || len(message)-5 > agentMaxMedia {
+					bridge.finish(time.Now(), agentEndViewerRejected)
 					return
 				}
 				if _, err := guest.Write(message); err != nil {
+					bridge.finish(time.Now(), agentEndGuestWriteFailed)
 					return
 				}
-				bridge.framesToGuest++
-				bridge.bytesToGuest += int64(len(message))
+				bridge.addViewerFrame(message[0], int64(len(message)))
 			}
 		}()
 		go func() {
@@ -411,6 +529,7 @@ func serveAgent(deps *agentDeps, w http.ResponseWriter, r *http.Request, ns, nam
 			for {
 				tag, body, err := agentFrame(guest)
 				if err != nil {
+					bridge.finish(time.Now(), agentEndGuestClosed)
 					return
 				}
 				frame := make([]byte, 0, len(body)+5)
@@ -420,10 +539,10 @@ func serveAgent(deps *agentDeps, w http.ResponseWriter, r *http.Request, ns, nam
 				frame = append(frame, length...)
 				frame = append(frame, body...)
 				if err := ws.writeMessage(frame); err != nil {
+					bridge.finish(time.Now(), agentEndViewWriteFailed)
 					return
 				}
-				bridge.framesToViewer++
-				bridge.bytesToViewer += int64(len(body) + 5)
+				bridge.addGuestFrame(tag, int64(len(body)+5))
 			}
 		}()
 		wg.Wait()

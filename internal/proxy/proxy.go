@@ -15,6 +15,9 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+
+	"github.com/kube-workspaces/proxy/internal/auth"
+	"github.com/kube-workspaces/proxy/internal/monitoring"
 )
 
 // Config holds proxy behavior hints for a specific workspace image.
@@ -109,6 +112,8 @@ type WorkspaceImageLookup func(namespace, name string) string
 
 // WorkspaceInfo holds workspace metadata relevant to proxy behavior.
 type WorkspaceInfo struct {
+	UID                string
+	Type               string
 	Image              string
 	PreservePathPrefix bool // from workspace annotation
 }
@@ -119,6 +124,9 @@ type WorkspaceInfoLookup func(namespace, name string) *WorkspaceInfo
 
 // HandlerOptions configures the proxy handler.
 type HandlerOptions struct {
+	// BackendDial is an optional internal dial hook (primarily for bridge tests).
+	BackendDial func(context.Context, string, string) (net.Conn, error)
+	Monitoring  *monitoring.Registry
 	// ConfigLookup returns proxy config for a given image reference.
 	ConfigLookup ConfigLookup
 	// WorkspaceImageLookup returns the image reference for a workspace by ns/name.
@@ -180,6 +188,47 @@ func Handler(opts *HandlerOptions) http.Handler {
 		rest := "/"
 		if len(parts) == 3 {
 			rest = "/" + parts[2]
+		}
+		var session *monitoring.Session
+		sseRequested := strings.Contains(r.Header.Get("Accept"), "text/event-stream")
+		if opts != nil && opts.Monitoring != nil {
+			m := monitoring.Metadata{Namespace: namespace, Name: name, Category: "http", Transport: "http", ByteLayer: "http_body", User: auth.Identity(r.Context())}
+			if opts.WorkspaceInfoLookup != nil {
+				if info := opts.WorkspaceInfoLookup(namespace, name); info != nil {
+					m.WorkspaceUID = info.UID
+					m.WorkspaceType = info.Type
+				}
+			}
+			upgrade := strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
+			if sseRequested {
+				m.Category = "application"
+				m.Transport = "sse"
+			}
+			if upgrade {
+				m.Category = "application"
+				m.Transport = "websocket"
+				m.ByteLayer = "websocket_stream"
+			}
+			if strings.HasSuffix(rest, "/api/websockets") {
+				m.Category = "display"
+				m.Transport = "selkies"
+				m.Tier = "1"
+				m.Role = "controller"
+			}
+			if rest == "/agent/" || strings.HasPrefix(rest, "/agent/") {
+				m.Category = "agent"
+				m.Transport = "agent"
+				m.Tier = "1"
+				m.Role = "purpose_unknown"
+				m.ByteLayer = "websocket_stream"
+			}
+			session = opts.Monitoring.Start(m)
+			defer session.End()
+			r = r.WithContext(monitoring.WithSession(r.Context(), session))
+			w = &monitoring.Writer{ResponseWriter: w, Session: session, AutoUpgrade: m.Transport != "agent"}
+			if !upgrade && r.Body != nil {
+				r.Body = &requestBody{ReadCloser: r.Body, session: session}
+			}
 		}
 		// Agent transport bridge: WebSocket at the edge, framed TCP inside.
 		// Handled before image-config lookup so an unconfigured image fails
@@ -302,7 +351,11 @@ func Handler(opts *HandlerOptions) http.Handler {
 			Transport: &http.Transport{
 				TLSClientConfig: &tls.Config{InsecureSkipVerify: cfg.ResolveTLSSkipVerify()},
 				DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-					conn, err := (&net.Dialer{}).DialContext(ctx, network, address)
+					dial := (&net.Dialer{}).DialContext
+					if opts != nil && opts.BackendDial != nil {
+						dial = opts.BackendDial
+					}
+					conn, err := dial(ctx, network, address)
 					if err == nil && claim != nil {
 						return &displayConn{Conn: conn, claim: claim}, nil
 					}
@@ -367,6 +420,9 @@ func Handler(opts *HandlerOptions) http.Handler {
 				}
 			},
 			ModifyResponse: func(resp *http.Response) error {
+				if resp.StatusCode != http.StatusSwitchingProtocols && (!sseRequested || (resp.StatusCode >= 200 && resp.StatusCode < 300 && strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream"))) {
+					session.Establish("")
+				}
 				resp.Header.Del("X-KW-Display-Ownership")
 				if claim != nil && resp.StatusCode == http.StatusSwitchingProtocols {
 					if _, valid := claim.validDeadline(); !valid {
@@ -414,7 +470,23 @@ func Handler(opts *HandlerOptions) http.Handler {
 		}
 
 		proxy.ServeHTTP(w, r)
+		if transport, ok := proxy.Transport.(*http.Transport); ok {
+			transport.CloseIdleConnections()
+		}
 	})
+}
+
+// Request body bytes are received at the client-facing boundary. HTTP requests
+// are in-flight work, not persistent workspace sessions.
+type requestBody struct {
+	io.ReadCloser
+	session *monitoring.Session
+}
+
+func (b *requestBody) Read(p []byte) (int, error) {
+	n, e := b.ReadCloser.Read(p)
+	b.session.Add(true, n)
+	return n, e
 }
 
 // rewriteLocation rewrites a Location header value to keep it under the proxy prefix.

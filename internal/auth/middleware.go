@@ -13,6 +13,14 @@ const (
 	SessionCookieName = "kw-session"
 )
 
+type identityKey struct{}
+
+// Identity is populated only after validating the platform session token.
+func Identity(ctx context.Context) string {
+	email, _ := ctx.Value(identityKey{}).(string)
+	return email
+}
+
 // ConfigReader abstracts the auth configuration and user lookups the
 // middleware needs, so tests can substitute a mock. *ConfigProvider
 // implements it.
@@ -97,6 +105,7 @@ func Middleware(provider ConfigReader, pathPrefix string) func(http.Handler) htt
 			}
 
 			// Check if user is in admin emails list (override role)
+			r = r.WithContext(context.WithValue(ctx, identityKey{}, token.Email))
 			role := token.Role
 			for _, adminEmail := range cfg.AdminEmails {
 				if strings.EqualFold(adminEmail, token.Email) {

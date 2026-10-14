@@ -30,6 +30,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/kube-workspaces/proxy/internal/monitoring"
 )
 
 const (
@@ -293,7 +295,10 @@ func (d *agentDeps) agentCall(ctx context.Context, action, api, ns, name string,
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 65536)).Decode(&ticket); err != nil {
 		return ticket, http.StatusServiceUnavailable, err
 	}
-	if ticket.Protocol != 1 || ticket.ID == "" || len(ticket.Ticket) == 0 || ticket.TTLMillis <= 0 {
+	if action == "release" {
+		return ticket, http.StatusOK, nil
+	}
+	if ticket.Protocol != 1 || ticket.TTLMillis <= 0 || (action == "attach" && (ticket.ID == "" || len(ticket.Ticket) == 0)) {
 		return ticket, http.StatusServiceUnavailable, errors.New("unsupported agent ticket protocol")
 	}
 	return ticket, http.StatusOK, nil
@@ -481,9 +486,8 @@ func serveAgent(deps *agentDeps, w http.ResponseWriter, r *http.Request, ns, nam
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), status)
 		return
 	}
-	renewCtx, renewCancel := context.WithCancel(context.Background())
-	defer renewCancel()
-	go agentRenewLoop(renewCtx, deps, ns, name, r.Header, ticket)
+	defer agentRelease(context.Background(), deps, ns, name, r.Header, ticket.ID)
+	go agentRenewLoop(ctx, deps, ns, name, r.Header, ticket, cancel)
 
 	ws, err := agentWSUpgrade(w, r)
 	if err != nil {
@@ -492,7 +496,6 @@ func serveAgent(deps *agentDeps, w http.ResponseWriter, r *http.Request, ns, nam
 	}
 	func() {
 		defer cancel()
-		defer agentRelease(context.Background(), deps, ns, name, r.Header, ticket.ID)
 		guest, err := deps.dial(ctx, ns, name, port)
 		if err != nil {
 			log.Printf("agent bridge %s/%s: guest dial failed: %v", ns, name, err)
@@ -501,6 +504,8 @@ func serveAgent(deps *agentDeps, w http.ResponseWriter, r *http.Request, ns, nam
 			return
 		}
 		defer guest.Close()
+		monitoring.Establish(r.Context(), "purpose_unknown")
+		go func() { <-ctx.Done(); _ = guest.Close(); _ = ws.close() }()
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() {
@@ -543,6 +548,19 @@ func serveAgent(deps *agentDeps, w http.ResponseWriter, r *http.Request, ns, nam
 					return
 				}
 				bridge.addGuestFrame(tag, int64(len(body)+5))
+				if tag == agentTagControl {
+					var envelope struct {
+						Type    string `json:"type"`
+						Payload struct {
+							Admitted bool `json:"admitted"`
+						} `json:"payload"`
+					}
+					if json.Unmarshal(body, &envelope) == nil && envelope.Type == "attachResult" {
+						monitoring.AgentEvidence(r.Context(), envelope.Payload.Admitted, false)
+					}
+				} else {
+					monitoring.AgentEvidence(r.Context(), false, true)
+				}
 			}
 		}()
 		wg.Wait()
@@ -550,7 +568,7 @@ func serveAgent(deps *agentDeps, w http.ResponseWriter, r *http.Request, ns, nam
 	close(bridge.done)
 }
 
-func agentRenewLoop(ctx context.Context, deps *agentDeps, ns, name string, headers http.Header, ticket agentTicket) {
+func agentRenewLoop(ctx context.Context, deps *agentDeps, ns, name string, headers http.Header, ticket agentTicket, cancel context.CancelFunc) {
 	interval := time.Duration(ticket.TTLMillis/2) * time.Millisecond
 	if interval <= 0 {
 		interval = time.Second
@@ -563,6 +581,7 @@ func agentRenewLoop(ctx context.Context, deps *agentDeps, ns, name string, heade
 			return
 		case <-ticker.C:
 			if _, _, err := deps.agentCall(ctx, "renew", deps.API, ns, name, headers, ticket.ID); err != nil {
+				cancel()
 				return
 			}
 		}

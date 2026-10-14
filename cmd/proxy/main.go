@@ -18,6 +18,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -29,6 +30,7 @@ import (
 
 	"github.com/kube-workspaces/proxy/internal/auth"
 	"github.com/kube-workspaces/proxy/internal/k8s"
+	"github.com/kube-workspaces/proxy/internal/monitoring"
 	"github.com/kube-workspaces/proxy/internal/proxy"
 )
 
@@ -109,6 +111,8 @@ func main() {
 			return nil
 		}
 		return &proxy.WorkspaceInfo{
+			UID:                info.UID,
+			Type:               info.Type,
 			Image:              info.Image,
 			PreservePathPrefix: info.PreservePathPrefix,
 		}
@@ -136,7 +140,14 @@ func main() {
 	}
 
 	// Create proxy handler for shared-host mode: /proxy/{namespace}/{name}/...
+	monitor := monitoring.New("proxy")
+	monitorCtx, stopMonitor := context.WithCancel(context.Background())
+	defer stopMonitor()
+	if err := monitoring.Listen(monitorCtx, monitor, ":9090", os.Getenv("KW_MONITORING_TOKEN")); err != nil {
+		log.Fatal(err)
+	}
 	proxyHandler := proxy.Handler(&proxy.HandlerOptions{
+		Monitoring:           monitor,
 		ConfigLookup:         configLookup,
 		WorkspaceImageLookup: workspaceImageLookup,
 		WorkspaceInfoLookup:  workspaceInfoLookup,
@@ -221,8 +232,9 @@ func main() {
 	handler := requestLoggingMiddleware(corsHandler)
 
 	server := &http.Server{
-		Addr:    fmt.Sprintf(":%d", *port),
-		Handler: handler,
+		BaseContext: func(net.Listener) context.Context { return monitorCtx },
+		Addr:        fmt.Sprintf(":%d", *port),
+		Handler:     handler,
 		// ReadHeaderTimeout bounds the initial header read so a slow or idle
 		// client cannot hold a connection open indefinitely, while ReadTimeout/
 		// WriteTimeout stay 0 for WebSocket and streaming responses.
@@ -238,6 +250,8 @@ func main() {
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
 		log.Println("Shutting down...")
+		stopMonitor()
+		monitor.Close()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		server.Shutdown(ctx)

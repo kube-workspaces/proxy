@@ -49,6 +49,7 @@ type Client struct {
 }
 
 type wsImageEntry struct {
+	uid, workspaceType string
 	image              string
 	preservePathPrefix bool
 	fetched            time.Time
@@ -56,6 +57,8 @@ type wsImageEntry struct {
 
 // WorkspaceInfo holds the image reference and proxy-relevant metadata for a workspace.
 type WorkspaceInfo struct {
+	UID                string
+	Type               string
 	Image              string
 	PreservePathPrefix bool
 }
@@ -109,7 +112,7 @@ func (c *Client) GetWorkspaceInfo(ctx context.Context, namespace, name string) *
 	c.wsImageCacheMu.RLock()
 	if entry, ok := c.wsImageCache[key]; ok && time.Since(entry.fetched) < c.wsImageCacheTTL {
 		c.wsImageCacheMu.RUnlock()
-		return &WorkspaceInfo{Image: entry.image, PreservePathPrefix: entry.preservePathPrefix}
+		return &WorkspaceInfo{UID: entry.uid, Type: entry.workspaceType, Image: entry.image, PreservePathPrefix: entry.preservePathPrefix}
 	}
 	c.wsImageCacheMu.RUnlock()
 
@@ -144,13 +147,17 @@ func (c *Client) GetWorkspaceInfo(ctx context.Context, namespace, name string) *
 		return nil
 	}
 	image, _ := container["image"].(string)
+	wsType, _, _ := unstructured.NestedString(obj.Object, "spec", "type")
+	if wsType == "" {
+		wsType = "container"
+	}
 
 	// Update cache
 	c.wsImageCacheMu.Lock()
-	c.wsImageCache[key] = wsImageEntry{image: image, preservePathPrefix: preservePathPrefix, fetched: time.Now()}
+	c.wsImageCache[key] = wsImageEntry{uid: string(obj.GetUID()), workspaceType: wsType, image: image, preservePathPrefix: preservePathPrefix, fetched: time.Now()}
 	c.wsImageCacheMu.Unlock()
 
-	return &WorkspaceInfo{Image: image, PreservePathPrefix: preservePathPrefix}
+	return &WorkspaceInfo{UID: string(obj.GetUID()), Type: wsType, Image: image, PreservePathPrefix: preservePathPrefix}
 }
 
 // ImageProxyConfig describes proxy behavior for an image.

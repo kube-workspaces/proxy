@@ -146,7 +146,11 @@ func TestAgentSeatReleasesAfterClose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first dial: %v", err)
 	}
-	payload, _ := json.Marshal(map[string]any{"protocol": "kw-agent-v1", "type": "ping"})
+	var greeting []byte
+	if err := websocket.Message.Receive(first, &greeting); err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := json.Marshal(map[string]any{"protocol": "kw-agent-v1", "type": "attach", "sessionId": "s"})
 	frame := append([]byte{0x00}, u32be(len(payload))...)
 	frame = append(frame, payload...)
 	if err := websocket.Message.Send(first, frame); err != nil {

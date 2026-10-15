@@ -192,7 +192,7 @@ func TestMonitoringAgentControlOnlyAndFailedUpgradeCleanup(t *testing.T) {
 	}
 	snap := reg.Snapshot()
 	conn := snap.Connections[0]
-	if conn.Transport != "agent" || conn.Tier != "1" || conn.MediaObserved || conn.GuestAdmitted || conn.Role != "purpose_unknown" || conn.ToClient == 0 {
+	if conn.Transport != "agent" || conn.Tier != "1" || conn.MediaObserved || conn.GuestAdmitted || conn.Role != "agent_display" || conn.ToClient == 0 {
 		t.Fatalf("control-only bridge mislabeled as media/controller: %+v", conn)
 	}
 	c.Close()

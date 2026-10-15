@@ -471,6 +471,16 @@ func serveAgent(deps *agentDeps, w http.ResponseWriter, r *http.Request, ns, nam
 		http.Error(w, "WebSocket upgrade required", http.StatusUpgradeRequired)
 		return
 	}
+	purpose := "display"
+	if value := r.URL.Query().Get("purpose"); value != "" {
+		switch value {
+		case "v1.display", "v1.telemetry", "v1.clipboard":
+			purpose = strings.TrimPrefix(value, "v1.")
+		default:
+			http.Error(w, "unsupported agent purpose", http.StatusBadRequest)
+			return
+		}
+	}
 	registry := deps.registry()
 	bridge := newAgentBridge(time.Now())
 	if !registry.tryHold(ns, name, bridge) {
@@ -481,12 +491,29 @@ func serveAgent(deps *agentDeps, w http.ResponseWriter, r *http.Request, ns, nam
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
+	var claim *displayClaim
+	if purpose == "display" {
+		var status int
+		var err error
+		claim, status, err = acquireDisplay(ctx, deps.API, ns, name, r.Header, cancel)
+		if err != nil {
+			http.Error(w, "interactive display claim refused", status)
+			return
+		}
+		defer claim.close()
+	}
 	ticket, status, err := deps.agentCall(ctx, "attach", deps.API, ns, name, r.Header, "")
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), status)
 		return
 	}
 	defer agentRelease(context.Background(), deps, ns, name, r.Header, ticket.ID)
+	grant, err := agentGrant(ticket)
+	if err != nil {
+		http.Error(w, "invalid agent authority response", http.StatusServiceUnavailable)
+		return
+	}
+	admission := &agentAdmission{grant: grant, purpose: purpose}
 	go agentRenewLoop(ctx, deps, ns, name, r.Header, ticket, cancel)
 
 	ws, err := agentWSUpgrade(w, r)
@@ -504,7 +531,7 @@ func serveAgent(deps *agentDeps, w http.ResponseWriter, r *http.Request, ns, nam
 			return
 		}
 		defer guest.Close()
-		monitoring.Establish(r.Context(), "purpose_unknown")
+		monitoring.Establish(r.Context(), "agent_"+purpose)
 		go func() { <-ctx.Done(); _ = guest.Close(); _ = ws.close() }()
 		var wg sync.WaitGroup
 		wg.Add(2)
@@ -517,9 +544,19 @@ func serveAgent(deps *agentDeps, w http.ResponseWriter, r *http.Request, ns, nam
 					bridge.finish(time.Now(), agentEndViewerClosed)
 					return
 				}
-				if len(message) < 5 || len(message)-5 > agentMaxMedia {
+				message, err = admission.viewerFrame(message)
+				if err != nil {
 					bridge.finish(time.Now(), agentEndViewerRejected)
 					return
+				}
+				if claim != nil {
+					deadline, valid := claim.validDeadline()
+					if !valid {
+						return
+					}
+					if err := guest.SetWriteDeadline(deadline); err != nil {
+						return
+					}
 				}
 				if _, err := guest.Write(message); err != nil {
 					bridge.finish(time.Now(), agentEndGuestWriteFailed)
@@ -543,6 +580,11 @@ func serveAgent(deps *agentDeps, w http.ResponseWriter, r *http.Request, ns, nam
 				binary.BigEndian.PutUint32(length, uint32(len(body)))
 				frame = append(frame, length...)
 				frame = append(frame, body...)
+				if tag == agentTagControl {
+					admission.observe(body)
+				} else if purpose != "display" {
+					continue // Legacy clipboard guests may emit media; never forward it.
+				}
 				if err := ws.writeMessage(frame); err != nil {
 					bridge.finish(time.Now(), agentEndViewWriteFailed)
 					return

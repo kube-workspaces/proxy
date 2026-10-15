@@ -6,6 +6,7 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"golang.org/x/net/websocket"
 )
@@ -42,6 +44,10 @@ func fakeAgentAPI(t *testing.T, refuseAttach bool, counters *agentCounters) *htt
 			action = r.URL.Path[i+1:]
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/tier1/") {
+			json.NewEncoder(w).Encode(map[string]any{"id": strings.Repeat("a", 64), "ttl_ms": 4000, "protocol": 1, "ok": true})
+			return
+		}
 		// Mirror the real API contract: these POSTs require a JSON body
 		// (Goa rejects bodiless posts with missing-payload). The fake
 		// enforces it so the client can never regress to nil bodies.
@@ -65,8 +71,9 @@ func fakeAgentAPI(t *testing.T, refuseAttach bool, counters *agentCounters) *htt
 				w.WriteHeader(http.StatusForbidden)
 				return
 			}
+			grant := base64.RawURLEncoding.EncodeToString([]byte(`{"workspaceUid":"ns","workspaceGeneration":"g1","audience":"workspace-agent","role":"controller","expiresAtNs":999999999999999999}`))
 			json.NewEncoder(w).Encode(map[string]any{
-				"id": "sess-test-1", "ticket": map[string]any{"workspaceUid": "ns"}, "ttl_ms": 60000, "protocol": 1,
+				"id": "sess-test-1", "ticket": "sess-test-1." + grant + ".signature", "ttl_ms": 60000, "protocol": 1,
 			})
 		case "renew":
 			counters.renews.Add(1)
@@ -106,6 +113,10 @@ func fakeGuestAgent(t *testing.T) net.Listener {
 			}
 			go func(c net.Conn) {
 				defer c.Close()
+				hello := []byte(`{"protocol":"kw-agent-v1","type":"hello","sessionId":"s","payload":{"controlOnlyAvailable":true}}`)
+				if _, err := c.Write(append(append([]byte{0}, u32be(len(hello))...), hello...)); err != nil {
+					return
+				}
 				for {
 					header := make([]byte, 5)
 					if _, err := readFull(c, header); err != nil {
@@ -210,7 +221,11 @@ func TestAgentBridgeEchoesControl(t *testing.T) {
 	}
 	defer ws.Close()
 
-	payload, _ := json.Marshal(map[string]any{"protocol": "kw-agent-v1", "type": "ping"})
+	var greeting []byte
+	if err := websocket.Message.Receive(ws, &greeting); err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := json.Marshal(map[string]any{"protocol": "kw-agent-v1", "type": "attach", "sessionId": "s", "payload": map[string]any{"ticket": "untrusted"}})
 	frame := append([]byte{0x00}, u32be(len(payload))...)
 	frame = append(frame, payload...)
 	if err := websocket.Message.Send(ws, frame); err != nil {
@@ -233,6 +248,44 @@ func TestAgentBridgeEchoesControl(t *testing.T) {
 	if counters.attaches.Load() != 1 {
 		t.Fatalf("API attach calls = %d, want 1", counters.attaches.Load())
 	}
+}
+
+func TestAgentPurposeHonorsSeatAndRevocation(t *testing.T) {
+	var counters agentCounters
+	base := fakeAgentAPI(t, false, &counters)
+	var busy atomic.Bool
+	busy.Store(true)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/tier1/claim") && busy.Load() || strings.HasSuffix(r.URL.Path, "/tier1/renew") {
+			w.WriteHeader(http.StatusConflict)
+			return
+		}
+		base.Config.Handler.ServeHTTP(w, r)
+	}))
+	defer api.Close()
+	guest := fakeGuestAgent(t)
+	srv := httptest.NewServer(agentTestHandler(t, api.URL, guest, guestPort(t, guest)))
+	defer srv.Close()
+	wsURL := "ws"+strings.TrimPrefix(srv.URL,"http")+"/proxy/ns1/ws1/agent/"
+	if c, err := dialAuth(t, wsURL); err == nil { c.Close(); t.Fatal("display bypassed console seat") }
+	if counters.attaches.Load() != 0 { t.Fatal("busy display minted grant") }
+	// Helpers can attach alongside RFB without claiming its seat.
+	c, err := dialAuth(t, wsURL+"?purpose=v1.clipboard")
+	if err != nil { t.Fatal(err) }
+	if err := c.Close(); err != nil { t.Fatal(err) }
+	// Use another handler to model a separate proxy replica. It has no local
+	// reservation for this workspace; distributed seat renewal still fences it.
+	busy.Store(false)
+	sibling := httptest.NewServer(agentTestHandler(t, api.URL, guest, guestPort(t, guest)))
+	defer sibling.Close()
+	c, err = dialAuth(t, "ws"+strings.TrimPrefix(sibling.URL,"http")+"/proxy/ns1/ws1/agent/")
+	if err != nil { t.Fatal(err) }
+	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(3*time.Second))
+	var greeting []byte
+	if err := websocket.Message.Receive(c,&greeting); err != nil {t.Fatal(err)}
+	var reply []byte
+	if err := websocket.Message.Receive(c,&reply); err == nil { t.Fatal("revoked seat retained stream") } else if timeout, ok := err.(net.Error); ok && timeout.Timeout() { t.Fatal("seat revocation did not close stream promptly") }
 }
 
 func TestAgentSecondViewerGetsBusy(t *testing.T) {

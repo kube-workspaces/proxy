@@ -582,6 +582,9 @@ func serveAgent(deps *agentDeps, w http.ResponseWriter, r *http.Request, ns, nam
 				frame = append(frame, body...)
 				if tag == agentTagControl {
 					admission.observe(body)
+					if version, platform, w, h := admission.hello(); version != "" {
+						monitoring.AgentHello(r.Context(), version, platform, w, h)
+					}
 				} else if purpose != "display" {
 					continue // Legacy clipboard guests may emit media; never forward it.
 				}

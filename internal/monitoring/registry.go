@@ -38,6 +38,14 @@ type Connection struct {
 	ToClient      uint64     `json:"to_client_bytes"`
 	MediaObserved bool       `json:"media_observed"`
 	GuestAdmitted bool       `json:"guest_admitted"`
+	// Guest agent build/platform/capture as advertised in hello. Empty
+	// until the first hello is observed on the bridge; never a readiness
+	// claim on its own, but combined with guest_admitted + media_observed
+	// it identifies what is actually streaming.
+	GuestVersion  string `json:"guest_version,omitempty"`
+	GuestPlatform string `json:"guest_platform,omitempty"`
+	CaptureWidth  int    `json:"capture_width,omitempty"`
+	CaptureHeight int    `json:"capture_height,omitempty"`
 }
 type Traffic struct {
 	Metadata
@@ -220,6 +228,26 @@ func AgentEvidence(ctx context.Context, admitted, media bool) {
 	defer s.registry.mu.Unlock()
 	s.connection.GuestAdmitted = s.connection.GuestAdmitted || admitted
 	s.connection.MediaObserved = s.connection.MediaObserved || media
+}
+
+// AgentHello records the guest's self-reported hello on a bridge: agent
+// build, platform and capture size. First hello wins for the connection;
+// a changed version mid-bridge means the guest restarted under us, which
+// the generation counters already surface elsewhere.
+func AgentHello(ctx context.Context, version, platform string, width, height int) {
+	s := FromContext(ctx)
+	if s == nil {
+		return
+	}
+	s.registry.mu.Lock()
+	defer s.registry.mu.Unlock()
+	if s.connection.GuestVersion != "" {
+		return
+	}
+	s.connection.GuestVersion = version
+	s.connection.GuestPlatform = platform
+	s.connection.CaptureWidth = width
+	s.connection.CaptureHeight = height
 }
 func Ignore(ctx context.Context) {
 	s := FromContext(ctx)

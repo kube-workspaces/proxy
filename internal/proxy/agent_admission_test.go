@@ -61,3 +61,27 @@ func TestAgentRejectsFramingAndUnsupportedHelper(t *testing.T) {
 		}
 	}
 }
+
+func TestAgentHelloCapture(t *testing.T) {
+	a := &agentAdmission{purpose: "display", grant: map[string]any{}}
+	if version, _, _, _ := a.hello(); version != "" {
+		t.Fatal("hello reported before any guest frame")
+	}
+	a.observe([]byte(`{"type":"hello","sessionId":"guest-session","payload":{"controlOnlyAvailable":false,"agentVersion":"0.4.0","platform":"windows","capture":{"width":1920,"height":1080}}}`))
+	version, platform, w, h := a.hello()
+	if version != "0.4.0" || platform != "windows" || w != 1920 || h != 1080 {
+		t.Fatalf("hello = %q %q %dx%d", version, platform, w, h)
+	}
+	// A second hello must not overwrite the first: mid-bridge version
+	// changes mean the guest restarted under us.
+	a.observe([]byte(`{"type":"hello","sessionId":"other-session","payload":{"agentVersion":"9.9.9"}}`))
+	if version, _, _, _ := a.hello(); version != "0.4.0" {
+		t.Fatalf("hello overwritten mid-bridge: %q", version)
+	}
+	// Malformed hellos never poison the record.
+	b := &agentAdmission{purpose: "display", grant: map[string]any{}}
+	b.observe([]byte(`{"type":"hello","sessionId":`))
+	if version, _, _, _ := b.hello(); version != "" {
+		t.Fatalf("malformed hello recorded: %q", version)
+	}
+}

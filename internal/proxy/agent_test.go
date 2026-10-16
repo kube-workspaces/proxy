@@ -266,26 +266,43 @@ func TestAgentPurposeHonorsSeatAndRevocation(t *testing.T) {
 	guest := fakeGuestAgent(t)
 	srv := httptest.NewServer(agentTestHandler(t, api.URL, guest, guestPort(t, guest)))
 	defer srv.Close()
-	wsURL := "ws"+strings.TrimPrefix(srv.URL,"http")+"/proxy/ns1/ws1/agent/"
-	if c, err := dialAuth(t, wsURL); err == nil { c.Close(); t.Fatal("display bypassed console seat") }
-	if counters.attaches.Load() != 0 { t.Fatal("busy display minted grant") }
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/proxy/ns1/ws1/agent/"
+	if c, err := dialAuth(t, wsURL); err == nil {
+		c.Close()
+		t.Fatal("display bypassed console seat")
+	}
+	if counters.attaches.Load() != 0 {
+		t.Fatal("busy display minted grant")
+	}
 	// Helpers can attach alongside RFB without claiming its seat.
 	c, err := dialAuth(t, wsURL+"?purpose=v1.clipboard")
-	if err != nil { t.Fatal(err) }
-	if err := c.Close(); err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
 	// Use another handler to model a separate proxy replica. It has no local
 	// reservation for this workspace; distributed seat renewal still fences it.
 	busy.Store(false)
 	sibling := httptest.NewServer(agentTestHandler(t, api.URL, guest, guestPort(t, guest)))
 	defer sibling.Close()
-	c, err = dialAuth(t, "ws"+strings.TrimPrefix(sibling.URL,"http")+"/proxy/ns1/ws1/agent/")
-	if err != nil { t.Fatal(err) }
+	c, err = dialAuth(t, "ws"+strings.TrimPrefix(sibling.URL, "http")+"/proxy/ns1/ws1/agent/")
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer c.Close()
-	_ = c.SetDeadline(time.Now().Add(3*time.Second))
+	_ = c.SetDeadline(time.Now().Add(3 * time.Second))
 	var greeting []byte
-	if err := websocket.Message.Receive(c,&greeting); err != nil {t.Fatal(err)}
+	if err := websocket.Message.Receive(c, &greeting); err != nil {
+		t.Fatal(err)
+	}
 	var reply []byte
-	if err := websocket.Message.Receive(c,&reply); err == nil { t.Fatal("revoked seat retained stream") } else if timeout, ok := err.(net.Error); ok && timeout.Timeout() { t.Fatal("seat revocation did not close stream promptly") }
+	if err := websocket.Message.Receive(c, &reply); err == nil {
+		t.Fatal("revoked seat retained stream")
+	} else if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
+		t.Fatal("seat revocation did not close stream promptly")
+	}
 }
 
 func TestAgentSecondViewerGetsBusy(t *testing.T) {

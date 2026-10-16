@@ -40,6 +40,12 @@ type agentAdmission struct {
 	session     string
 	controlOnly bool
 	attached    bool
+	// Guest self-description from hello, for readiness evidence. Empty
+	// until the first hello arrives.
+	version  string
+	platform string
+	capW     int
+	capH     int
 }
 
 func (a *agentAdmission) observe(body []byte) {
@@ -49,12 +55,28 @@ func (a *agentAdmission) observe(body []byte) {
 		Type    string `json:"type"`
 		Session string `json:"sessionId"`
 		Payload struct {
-			ControlOnly bool `json:"controlOnlyAvailable"`
+			ControlOnly  bool   `json:"controlOnlyAvailable"`
+			AgentVersion string `json:"agentVersion"`
+			Platform     string `json:"platform"`
+			Capture      struct {
+				Width  int `json:"width"`
+				Height int `json:"height"`
+			} `json:"capture"`
 		} `json:"payload"`
 	}
 	if json.Unmarshal(body, &envelope) == nil && envelope.Type == "hello" && a.session == "" {
 		a.session, a.controlOnly = envelope.Session, envelope.Payload.ControlOnly
+		a.version, a.platform = envelope.Payload.AgentVersion, envelope.Payload.Platform
+		a.capW, a.capH = envelope.Payload.Capture.Width, envelope.Payload.Capture.Height
 	}
+}
+
+// hello reports the observed guest description. Empty version means no
+// hello has been seen yet; callers must not treat it as stream readiness.
+func (a *agentAdmission) hello() (version, platform string, w, h int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.version, a.platform, a.capW, a.capH
 }
 
 // viewerFrame enforces exact framing and substitutes the edge-owned grant.

@@ -85,3 +85,26 @@ func TestAgentHelloCapture(t *testing.T) {
 		t.Fatalf("malformed hello recorded: %q", version)
 	}
 }
+
+func TestProxyGuestClockRemainsMonotonicAcrossSyntheticKeyframes(t *testing.T) {
+	a := &agentAdmission{purpose: "display", grant: map[string]any{}}
+	a.observe([]byte(`{"type":"hello","sessionId":"guest-session"}`))
+	var previousSequence, previousStamp uint64
+	for _, kind := range []string{"attach", "input", "keyframeRequest", "input", "resizeRequest"} {
+		frame, err := a.viewerFrame(admissionFrame(kind, nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var msg struct {
+			Sequence uint64 `json:"sequence"`
+			Stamp    uint64 `json:"sentAtNs"`
+		}
+		if err := json.Unmarshal(frame[5:], &msg); err != nil {
+			t.Fatal(err)
+		}
+		if msg.Sequence <= previousSequence || msg.Stamp <= previousStamp {
+			t.Fatal("guest clock regressed")
+		}
+		previousSequence, previousStamp = msg.Sequence, msg.Stamp
+	}
+}

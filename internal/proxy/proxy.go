@@ -150,7 +150,9 @@ type HandlerOptions struct {
 	AgentAPIURL string
 	// AgentDial opens the guest agent TCP connection. Defaults to the
 	// workspace Service address; overridable for tests and embedded use.
-	AgentDial func(ctx context.Context, ns, name string, port int32) (net.Conn, error)
+	AgentDial         func(ctx context.Context, ns, name string, port int32) (net.Conn, error)
+	AgentOwner        string
+	AgentResolveOwner func(context.Context, string) (string, error)
 }
 
 // Handler returns an http.Handler that proxies requests to workspace services.
@@ -272,6 +274,9 @@ func Handler(opts *HandlerOptions) http.Handler {
 			}
 			if opts != nil && opts.AgentDial != nil {
 				deps.DialAgent = opts.AgentDial
+			}
+			if opts != nil {
+				deps.Owner, deps.ResolveOwner = opts.AgentOwner, opts.AgentResolveOwner
 			}
 			serveAgent(deps, w, r, namespace, name, agentPort)
 			return

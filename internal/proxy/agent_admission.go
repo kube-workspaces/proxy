@@ -7,6 +7,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"time"
 )
 
 // The API response is obtained by the authenticated bridge, never the viewer.
@@ -40,6 +41,8 @@ type agentAdmission struct {
 	session     string
 	controlOnly bool
 	attached    bool
+	sequence    uint64
+	lastSentNs  int64
 	// Guest self-description from hello, for readiness evidence. Empty
 	// until the first hello arrives.
 	version  string
@@ -119,6 +122,16 @@ func (a *agentAdmission) viewerFrame(frame []byte) ([]byte, error) {
 			return nil, errors.New("action forbidden for agent helper")
 		}
 	}
+	// The proxy is the sole guest controller connection. Re-stamp its ordered
+	// stream so a coalesced keyframe for late joiners cannot race viewer clocks.
+	a.sequence++
+	stamp := time.Now().UnixNano()
+	if stamp <= a.lastSentNs {
+		stamp = a.lastSentNs + 1
+	}
+	a.lastSentNs = stamp
+	envelope["sequence"], _ = json.Marshal(a.sequence)
+	envelope["sentAtNs"], _ = json.Marshal(stamp)
 	body, err := json.Marshal(envelope)
 	if err != nil {
 		return nil, err

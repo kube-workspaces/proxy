@@ -125,17 +125,24 @@ func (s agentSnapshot) MediaBytes() int64 { return s.MediaToGuest + s.MediaToVie
 // the indicator contract requires (API/proxy/client/guest must agree on
 // usage). Both copy goroutines update it; readers take Snapshot.
 type agentBridge struct {
-	mu             sync.Mutex
-	attachedAt     time.Time
-	endedAt        time.Time
-	endReason      string
-	controlToGuest int64
-	mediaToGuest   int64
-	controlToView  int64
-	mediaToView    int64
-	framesToGuest  int64
-	framesToView   int64
-	done           chan struct{}
+	mu                  sync.Mutex
+	attachedAt          time.Time
+	endedAt             time.Time
+	endReason           string
+	controlToGuest      int64
+	mediaToGuest        int64
+	controlToView       int64
+	mediaToView         int64
+	framesToGuest       int64
+	framesToView        int64
+	done                chan struct{}
+	observers           map[*agentObserver]struct{}
+	helloFrame          []byte
+	admitted            bool
+	sps, pps            []byte
+	requestKeyframe     func() error
+	lastKeyframeRequest time.Time
+	keyframePending     bool
 }
 
 // newAgentBridge holds a session starting now.
@@ -221,7 +228,9 @@ type agentDeps struct {
 	// Credential extracts the viewer Authorization for API calls.
 	Credential func(r *http.Request) string
 	// Registry for single-session discipline. Defaults to a fresh one when nil.
-	Registry *agentRegistry
+	Registry     *agentRegistry
+	Owner        string
+	ResolveOwner func(context.Context, string) (string, error)
 }
 
 func (d *agentDeps) registry() *agentRegistry {
@@ -474,12 +483,16 @@ func serveAgent(deps *agentDeps, w http.ResponseWriter, r *http.Request, ns, nam
 	purpose := "display"
 	if value := r.URL.Query().Get("purpose"); value != "" {
 		switch value {
-		case "v1.display", "v1.telemetry", "v1.clipboard":
+		case "v1.display", "v1.telemetry", "v1.clipboard", "v1.observe":
 			purpose = strings.TrimPrefix(value, "v1.")
 		default:
 			http.Error(w, "unsupported agent purpose", http.StatusBadRequest)
 			return
 		}
+	}
+	if purpose == "observe" {
+		serveAgentObserver(deps, w, r, ns, name)
+		return
 	}
 	registry := deps.registry()
 	bridge := newAgentBridge(time.Now())
@@ -488,6 +501,7 @@ func serveAgent(deps *agentDeps, w http.ResponseWriter, r *http.Request, ns, nam
 		return
 	}
 	defer registry.release(ns, name, bridge)
+	defer close(bridge.done)
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -495,7 +509,10 @@ func serveAgent(deps *agentDeps, w http.ResponseWriter, r *http.Request, ns, nam
 	if purpose == "display" {
 		var status int
 		var err error
-		claim, status, err = acquireDisplay(ctx, deps.API, ns, name, r.Header, cancel)
+		headers := r.Header.Clone()
+		headers.Set("X-KW-Display-Transport", "agent")
+		headers.Set("X-KW-Agent-Owner", deps.Owner)
+		claim, status, err = acquireDisplay(ctx, deps.API, ns, name, headers, cancel)
 		if err != nil {
 			http.Error(w, "interactive display claim refused", status)
 			return
@@ -531,6 +548,49 @@ func serveAgent(deps *agentDeps, w http.ResponseWriter, r *http.Request, ns, nam
 			return
 		}
 		defer guest.Close()
+		// Viewer controls and proxy-coalesced late-join keyframes share one
+		// serializer and clock; neither may overtake the other's guest writes.
+		var guestWriteMu sync.Mutex
+		writeViewer := func(message []byte) (string, error) {
+			guestWriteMu.Lock()
+			defer guestWriteMu.Unlock()
+			message, err := admission.viewerFrame(message)
+			if err != nil {
+				return agentEndViewerRejected, err
+			}
+			deadline := time.Now().Add(2 * time.Second)
+			if claim != nil {
+				fence, valid := claim.validDeadline()
+				if !valid {
+					return agentEndGuestWriteFailed, errors.New("display claim expired")
+				}
+				if fence.Before(deadline) {
+					deadline = fence
+				}
+			}
+			if err := guest.SetWriteDeadline(deadline); err != nil {
+				return agentEndGuestWriteFailed, err
+			}
+			if _, err := guest.Write(message); err != nil {
+				return agentEndGuestWriteFailed, err
+			}
+			bridge.addViewerFrame(message[0], int64(len(message)))
+			return "", nil
+		}
+		bridge.mu.Lock()
+		bridge.requestKeyframe = func() error {
+			admission.mu.Lock()
+			session := admission.session
+			admission.mu.Unlock()
+			body, _ := json.Marshal(map[string]any{"protocol": "kw-agent-v1", "protocolVersion": 1, "generation": 1, "channel": "control", "type": "keyframeRequest", "sessionId": session, "payload": map[string]any{}})
+			reason, err := writeViewer(agentWire(0, body))
+			if err != nil {
+				bridge.finish(time.Now(), reason)
+				_ = guest.Close()
+			}
+			return err
+		}
+		bridge.mu.Unlock()
 		monitoring.Establish(r.Context(), "agent_"+purpose)
 		go func() { <-ctx.Done(); _ = guest.Close(); _ = ws.close() }()
 		var wg sync.WaitGroup
@@ -544,25 +604,10 @@ func serveAgent(deps *agentDeps, w http.ResponseWriter, r *http.Request, ns, nam
 					bridge.finish(time.Now(), agentEndViewerClosed)
 					return
 				}
-				message, err = admission.viewerFrame(message)
-				if err != nil {
-					bridge.finish(time.Now(), agentEndViewerRejected)
+				if reason, err := writeViewer(message); err != nil {
+					bridge.finish(time.Now(), reason)
 					return
 				}
-				if claim != nil {
-					deadline, valid := claim.validDeadline()
-					if !valid {
-						return
-					}
-					if err := guest.SetWriteDeadline(deadline); err != nil {
-						return
-					}
-				}
-				if _, err := guest.Write(message); err != nil {
-					bridge.finish(time.Now(), agentEndGuestWriteFailed)
-					return
-				}
-				bridge.addViewerFrame(message[0], int64(len(message)))
 			}
 		}()
 		go func() {
@@ -588,6 +633,10 @@ func serveAgent(deps *agentDeps, w http.ResponseWriter, r *http.Request, ns, nam
 				} else if purpose != "display" {
 					continue // Legacy clipboard guests may emit media; never forward it.
 				}
+				if purpose == "display" {
+					bridge.publish(frame)
+				}
+				_ = ws.conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
 				if err := ws.writeMessage(frame); err != nil {
 					bridge.finish(time.Now(), agentEndViewWriteFailed)
 					return
@@ -610,7 +659,6 @@ func serveAgent(deps *agentDeps, w http.ResponseWriter, r *http.Request, ns, nam
 		}()
 		wg.Wait()
 	}()
-	close(bridge.done)
 }
 
 func agentRenewLoop(ctx context.Context, deps *agentDeps, ns, name string, headers http.Header, ticket agentTicket, cancel context.CancelFunc) {

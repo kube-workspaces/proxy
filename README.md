@@ -62,6 +62,8 @@ go build -o bin/proxy ./cmd/proxy/
 | `PATH_PREFIX` | `/proxy` | URL path prefix for proxy routes |
 | `ALLOWED_ORIGINS` | (none) | Comma-separated CORS allowed origins |
 | `KUBECONFIG` | (in-cluster) | Path to kubeconfig file (local dev) |
+| `AGENT_API_URL` | (none) | Trusted API origin for agent grants and premium observer membership/discovery |
+| `DISPLAY_API_URL` | (none) | Trusted API origin for interactive display ownership |
 
 ### Command-Line Flags
 
@@ -154,6 +156,28 @@ On HTML responses, the proxy:
 
 WebSocket connections are proxied transparently. The `Upgrade` and `Connection` headers are passed through. Image CRs can declare known WebSocket paths in `spec.proxyConfig.websocketPaths`.
 
+### Premium display observers
+
+An Image with `spec.proxyConfig.agentPort` exposes the framed agent bridge at
+`/proxy/{namespace}/{name}/agent/`. `purpose=v1.display` holds the exclusive
+interactive seat and guest connection. `purpose=v1.observe` joins its encoded
+H.264/Opus output through the proxy, using the API's shared-display membership
+gate (`KW_DISPLAY_SHARED=on` on the API).
+
+Observers obtain no guest tickets and cannot inject input, change clipboard,
+resize the guest or configure the encoder. Each reader is bounded to 32 queued
+frames / 16 MiB; overflow or a blocked write detaches that reader. Late joins
+wait for a fresh IDR with SPS/PPS; proxy-owned keyframe demand is coalesced to
+one request per second so an idle desktop can bootstrap without replaying stale
+video. At most seven observers share a controller. Controller loss or revocation
+ends the generation; control changes use the existing consented Tier 1 takeover.
+
+The seat records the owning proxy pod. Requests landing on another replica make
+one authenticated hop to that pod, resolved through Kubernetes in the platform
+namespace and checked against the proxy release/service account. The proxy's
+namespaced Role therefore needs `get` on `pods`, as included in the deployment
+manifests. Single-replica readers do not require a peer lookup.
+
 ### TLS Backends
 
 When `spec.proxyConfig.tlsInsecure: true` is set on an Image CR, the proxy connects to the backend over TLS with certificate verification disabled (for self-signed certs common in VNC/desktop images).
@@ -171,6 +195,7 @@ Configurable via the `ALLOWED_ORIGINS` environment variable. Supports preflight 
 | `Workspace` (kubeworkspaces.io/v1alpha1) | Namespaced | Read | 10s |
 | `Image` (kubeworkspaces.io/v1alpha1) | Cluster | Read | 30s |
 | `Secret` | Namespaced | Read | With AuthConfig (30s) |
+| `Pod` | Platform namespace | Get | None (premium observer owner resolution) |
 
 The Kubernetes client is configured with QPS=50 and Burst=100 to prevent rate-limiting delays under load.
 

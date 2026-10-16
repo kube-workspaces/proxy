@@ -147,6 +147,18 @@ func main() {
 		log.Fatal(err)
 	}
 	proxyHandler := proxy.Handler(&proxy.HandlerOptions{
+		AgentOwner: func() string { host, _ := os.Hostname(); return host }(),
+		AgentResolveOwner: func(ctx context.Context, owner string) (string, error) {
+			ns, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+			if err != nil {
+				return "", err
+			}
+			self, err := os.Hostname()
+			if err != nil {
+				return "", err
+			}
+			return client.ResolveAgentOwner(ctx, strings.TrimSpace(string(ns)), self, owner, fmt.Sprint(*port))
+		},
 		Monitoring:           monitor,
 		ConfigLookup:         configLookup,
 		WorkspaceImageLookup: workspaceImageLookup,

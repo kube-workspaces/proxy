@@ -46,6 +46,12 @@ func acquireDisplay(ctx context.Context, api, ns, name string, headers http.Head
 	} else {
 		c.credential.Set("Authorization", headers.Get("Authorization"))
 	}
+	if headers.Get("X-KW-Display-Transport") == "agent" {
+		c.credential.Set("X-KW-Display-Transport", "agent")
+	}
+	if owner := headers.Get("X-KW-Agent-Owner"); owner != "" {
+		c.credential.Set("X-KW-Agent-Owner", owner)
+	}
 	started := time.Now()
 	response, status, err := c.call(ctx, "claim")
 	if err != nil {

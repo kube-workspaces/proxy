@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -157,8 +158,13 @@ func (p *ConfigProvider) loadFromCluster(ctx context.Context) (*AuthConfig, erro
 }
 
 func (p *ConfigProvider) getSecret(ctx context.Context, name, key string) (string, error) {
-	// Try kube-workspaces-system namespace first, then default
-	for _, ns := range []string{"kube-workspaces-system", "default"} {
+	// Match the API: auth Secrets belong to this installation's pod namespace.
+	// Keep legacy lookup only for launches without an explicit namespace.
+	namespaces := []string{"kube-workspaces-system", "default"}
+	if ns := os.Getenv("POD_NAMESPACE"); ns != "" {
+		namespaces = []string{ns}
+	}
+	for _, ns := range namespaces {
 		obj, err := p.dynamicClient.Resource(secretGVR).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
 			continue

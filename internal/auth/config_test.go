@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"testing"
 	"time"
@@ -31,6 +32,55 @@ func authConfigObj(enabled bool) *unstructured.Unstructured {
 	obj.SetName("default")
 	obj.Object["spec"] = map[string]interface{}{"enabled": enabled}
 	return obj
+}
+
+func TestSigningKeyUsesPodNamespace(t *testing.T) {
+	for _, namespace := range []string{"", "kube-workspaces-system", "custom-install"} {
+		t.Run("namespace="+namespace, func(t *testing.T) {
+			t.Setenv("POD_NAMESPACE", namespace)
+			ns := namespace
+			if ns == "" {
+				ns = "kube-workspaces-system"
+			}
+			config := authConfigObj(true)
+			unstructured.SetNestedMap(config.Object, map[string]interface{}{
+				"signingKey": map[string]interface{}{"name": "session", "key": "key"},
+			}, "spec", "session")
+			secret := &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": "v1", "kind": "Secret",
+				"metadata": map[string]interface{}{"name": "session", "namespace": ns},
+				"data":     map[string]interface{}{"key": base64.StdEncoding.EncodeToString([]byte("installation-key"))},
+			}}
+			client := newFakeDynamic(config, secret)
+			cfg, err := NewConfigProvider(client).GetConfig(context.Background())
+			if err != nil || string(cfg.SigningKey) != "installation-key" {
+				t.Fatalf("namespace=%q config=%+v err=%v", namespace, cfg, err)
+			}
+			for _, action := range client.Actions() {
+				if action.GetResource() == secretGVR && action.GetNamespace() != ns {
+					t.Fatalf("looked up signing key in %q, want %q", action.GetNamespace(), ns)
+				}
+			}
+		})
+	}
+}
+
+func TestSigningKeyDoesNotFallBackFromExplicitPodNamespace(t *testing.T) {
+	t.Setenv("POD_NAMESPACE", "custom-install")
+	secret := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "v1", "kind": "Secret",
+		"metadata": map[string]interface{}{"name": "session", "namespace": "kube-workspaces-system"},
+		"data":     map[string]interface{}{"key": base64.StdEncoding.EncodeToString([]byte("other-installation-key"))},
+	}}
+	client := newFakeDynamic(secret)
+	if key, err := NewConfigProvider(client).getSecret(context.Background(), "session", "key"); err == nil || key != "" {
+		t.Fatalf("used another installation's key: %q err=%v", key, err)
+	}
+	for _, action := range client.Actions() {
+		if action.GetResource() == secretGVR && action.GetNamespace() != "custom-install" {
+			t.Fatalf("cross-installation Secret lookup in %q", action.GetNamespace())
+		}
+	}
 }
 
 // TestNotFoundMeansAuthDisabled: no AuthConfig CR means auth is genuinely

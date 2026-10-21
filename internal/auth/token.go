@@ -15,6 +15,9 @@ import (
 
 // SessionToken represents the payload of a kw-session token.
 type SessionToken struct {
+	UserUID     string   `json:"user_uid,omitempty"`
+	Type        string   `json:"typ,omitempty"`
+	JTI         string   `json:"jti,omitempty"`
 	Email       string   `json:"email"`
 	DisplayName string   `json:"displayName,omitempty"`
 	Role        string   `json:"role"`
@@ -26,6 +29,13 @@ type SessionToken struct {
 // ValidateSessionToken validates and decodes a session token.
 // Token format: base64url(JSON payload).base64url(HMAC-SHA256 signature)
 func ValidateSessionToken(tokenStr string, signingKey []byte) (*SessionToken, error) {
+	return ValidateSessionTokenWithKeys(tokenStr, [][]byte{signingKey})
+}
+
+func ValidateSessionTokenWithKeys(tokenStr string, signingKeys [][]byte) (*SessionToken, error) {
+	if len(signingKeys) == 0 {
+		return nil, fmt.Errorf("session signing key is not configured")
+	}
 	parts := strings.SplitN(tokenStr, ".", 2)
 	if len(parts) != 2 {
 		return nil, fmt.Errorf("invalid token format")
@@ -35,11 +45,20 @@ func ValidateSessionToken(tokenStr string, signingKey []byte) (*SessionToken, er
 	signature := parts[1]
 
 	// Verify HMAC signature
-	mac := hmac.New(sha256.New, signingKey)
-	mac.Write([]byte(encodedPayload))
-	expectedSig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
-
-	if !hmac.Equal([]byte(signature), []byte(expectedSig)) {
+	valid := false
+	for _, key := range signingKeys {
+		if len(key) == 0 {
+			continue
+		}
+		mac := hmac.New(sha256.New, key)
+		mac.Write([]byte(encodedPayload))
+		expectedSig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+		if hmac.Equal([]byte(signature), []byte(expectedSig)) {
+			valid = true
+			break
+		}
+	}
+	if !valid {
 		return nil, fmt.Errorf("invalid token signature")
 	}
 

@@ -14,9 +14,14 @@ import (
 )
 
 type mockProvider struct {
-	config  *AuthConfig
-	user    *UserInfo
-	userErr error
+	config    *AuthConfig
+	user      *UserInfo
+	userErr   error
+	deviceErr error
+}
+
+func (m *mockProvider) ValidateDevice(context.Context, *SessionToken) error {
+	return m.deviceErr
 }
 
 func (m *mockProvider) GetConfig(ctx context.Context) (*AuthConfig, error) {
@@ -110,7 +115,11 @@ func TestMiddlewareRoleEnforcement(t *testing.T) {
 		{"malformed token is 401", &mockProvider{config: &AuthConfig{Enabled: true, SigningKey: key}}, "/proxy/ns/name/foo", "Bearer not-a-token", http.StatusUnauthorized},
 		{"forged token is 401", &mockProvider{config: &AuthConfig{Enabled: true, SigningKey: key}}, "/proxy/ns/name/foo", "Bearer " + signPayload([]byte("wrong-key"), SessionToken{Email: "viewer@example.com", Role: "viewer", ExpiresAt: time.Now().Add(time.Hour).Unix()}), http.StatusUnauthorized},
 		{"expired token is 401", &mockProvider{config: &AuthConfig{Enabled: true, SigningKey: key}}, "/proxy/ns/name/foo", "Bearer " + signPayload(key, SessionToken{Email: "viewer@example.com", Role: "viewer", ExpiresAt: time.Now().Add(-time.Hour).Unix()}), http.StatusUnauthorized},
-		{"admin role bypasses namespace checks", &mockProvider{config: &AuthConfig{Enabled: true, SigningKey: key}, user: &UserInfo{Email: "admin@example.com", Role: "viewer"}}, "/proxy/ns/name/foo", "Bearer " + validToken(key, "admin@example.com", "admin"), http.StatusOK},
+		{"current admin bypasses namespace checks", &mockProvider{config: &AuthConfig{Enabled: true, SigningKey: key}, user: &UserInfo{Email: "admin@example.com", Role: "admin"}}, "/proxy/ns/name/foo", "Bearer " + validToken(key, "admin@example.com", "viewer"), http.StatusOK},
+		{"demoted token admin loses bypass", &mockProvider{config: &AuthConfig{Enabled: true, SigningKey: key}, user: viewerNS}, "/proxy/other-ns/name/foo", "Bearer " + validToken(key, "viewer@example.com", "admin"), http.StatusForbidden},
+		{"demoted editor loses interactive access", &mockProvider{config: &AuthConfig{Enabled: true, SigningKey: key}, user: viewerNS}, "/proxy/viewer-ns/name/api/websockets", "Bearer " + validToken(key, "viewer@example.com", "editor"), http.StatusForbidden},
+		{"disabled token admin is rejected", &mockProvider{config: &AuthConfig{Enabled: true, SigningKey: key}, userErr: errors.New("disabled")}, "/proxy/ns/name/foo", "Bearer " + validToken(key, "admin@example.com", "admin"), http.StatusForbidden},
+		{"missing configured admin is rejected", &mockProvider{config: &AuthConfig{Enabled: true, SigningKey: key, AdminEmails: []string{"admin@example.com"}}, userErr: errors.New("not found")}, "/proxy/ns/name/foo", "Bearer " + validToken(key, "admin@example.com", "admin"), http.StatusForbidden},
 		{"admin email override bypasses namespace checks", &mockProvider{config: &AuthConfig{Enabled: true, SigningKey: key, AdminEmails: []string{"admin@example.com"}}, user: &UserInfo{Email: "admin@example.com", Role: "viewer"}}, "/proxy/ns/name/foo", "Bearer " + validToken(key, "admin@example.com", "viewer"), http.StatusOK},
 		{"viewer with namespace access passes", &mockProvider{config: &AuthConfig{Enabled: true, SigningKey: key}, user: viewerNS}, "/proxy/viewer-ns/name/foo", "Bearer " + validToken(key, "viewer@example.com", "viewer"), http.StatusOK},
 		{"viewer without namespace access is 403", &mockProvider{config: &AuthConfig{Enabled: true, SigningKey: key}, user: viewerNS}, "/proxy/other-ns/name/foo", "Bearer " + validToken(key, "viewer@example.com", "viewer"), http.StatusForbidden},

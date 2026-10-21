@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"net/http"
 	"testing"
 	"time"
 
@@ -83,16 +84,78 @@ func TestSigningKeyDoesNotFallBackFromExplicitPodNamespace(t *testing.T) {
 	}
 }
 
-// TestNotFoundMeansAuthDisabled: no AuthConfig CR means auth is genuinely
-// off (opt-in), not a load failure.
-func TestNotFoundMeansAuthDisabled(t *testing.T) {
-	p := NewConfigProvider(newFakeDynamic())
-	cfg, err := p.loadFromCluster(context.Background())
-	if err != nil {
-		t.Fatalf("loadFromCluster: %v", err)
+func TestEnabledAuthRejectsUnavailableSigningKey(t *testing.T) {
+	t.Setenv("POD_NAMESPACE", "custom-install")
+	for _, mode := range []string{"no reference", "no key field", "missing secret", "missing data key", "empty key", "unreadable secret"} {
+		t.Run(mode, func(t *testing.T) {
+			config := authConfigObj(true)
+			if mode != "no reference" {
+				ref := map[string]interface{}{"name": "session", "key": "key"}
+				if mode == "no key field" {
+					delete(ref, "key")
+				}
+				if err := unstructured.SetNestedMap(config.Object, ref, "spec", "session", "signingKey"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			client := newFakeDynamic(config)
+			if mode == "missing data key" || mode == "empty key" {
+				data := map[string]interface{}{}
+				if mode == "empty key" {
+					data["key"] = ""
+				}
+				secret := &unstructured.Unstructured{Object: map[string]interface{}{
+					"apiVersion": "v1", "kind": "Secret",
+					"metadata": map[string]interface{}{"name": "session", "namespace": "custom-install"},
+					"data":     data,
+				}}
+				if err := client.Tracker().Add(secret); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mode == "unreadable secret" {
+				client.PrependReactor("get", "secrets", uncatchableBoom(t))
+			}
+			provider := NewConfigProvider(client)
+			cfg, err := provider.GetConfig(context.Background())
+			if cfg != nil || !errors.Is(err, ErrConfigUnavailable) {
+				t.Fatalf("expected unavailable config, got cfg=%+v err=%v", cfg, err)
+			}
+			// A token signed with a known empty key must never reach an upstream,
+			// even when it claims an administrator role.
+			if got := doRequest(t, provider, "/proxy/ns/workspace/", "Bearer "+validToken(nil, "attacker@example.com", "admin")); got != http.StatusServiceUnavailable {
+				t.Fatalf("request status=%d, want 503", got)
+			}
+		})
 	}
-	if cfg.Enabled {
-		t.Fatal("auth must not be considered enabled when the AuthConfig is absent")
+}
+
+func TestTokenValidationRejectsEmptySigningKey(t *testing.T) {
+	if _, err := ValidateSessionToken(validToken(nil, "attacker@example.com", "admin"), nil); err == nil {
+		t.Fatal("accepted token signed with an empty key")
+	}
+}
+
+func TestAuthDisabledRequiresExplicitConfiguration(t *testing.T) {
+	malformed := authConfigObj(false)
+	malformed.Object["spec"] = map[string]interface{}{"enabled": "false"}
+	missing := authConfigObj(false)
+	missing.Object["spec"] = map[string]interface{}{}
+	for _, obj := range []*unstructured.Unstructured{nil, malformed, missing, authConfigObj(false)} {
+		client := newFakeDynamic()
+		if obj != nil {
+			if err := client.Tracker().Add(obj); err != nil {
+				t.Fatal(err)
+			}
+		}
+		cfg, err := NewConfigProvider(client).GetConfig(context.Background())
+		if obj != nil && obj.Object["spec"].(map[string]interface{})["enabled"] == false {
+			if err != nil || cfg == nil || cfg.Enabled {
+				t.Fatalf("explicit disabled config=%+v err=%v", cfg, err)
+			}
+		} else if cfg != nil || !errors.Is(err, ErrConfigUnavailable) {
+			t.Fatalf("invalid config must fail closed: cfg=%+v err=%v", cfg, err)
+		}
 	}
 }
 
@@ -111,30 +174,61 @@ func TestGetConfigFailsClosedOnFirstLoad(t *testing.T) {
 	}
 }
 
-// TestStaleCacheServedOnRefreshFailure: after a successful first load, a
-// refresh error must keep serving the cached config rather than deny or
-// downgrade. Notably, serving stale must NOT flip enabled → disabled, and
-// NotFound on refresh must never convert a good enabled config into pass-through.
-func TestStaleCacheServedOnRefreshFailure(t *testing.T) {
-	provider := NewConfigProvider(newFakeDynamic(authConfigObj(true)))
+func TestRefreshFailsClosedAndRecoversWithKeyRotation(t *testing.T) {
+	config := authConfigObj(true)
+	if err := unstructured.SetNestedMap(config.Object, map[string]interface{}{
+		"name": "session", "key": "key",
+	}, "spec", "session", "signingKey"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POD_NAMESPACE", "kube-workspaces-system")
+	secret := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "v1", "kind": "Secret",
+		"metadata": map[string]interface{}{"name": "session", "namespace": "kube-workspaces-system"},
+		"data":     map[string]interface{}{"key": base64.StdEncoding.EncodeToString([]byte("installation-key"))},
+	}}
+	provider := NewConfigProvider(newFakeDynamic(config, secret))
 	cfg, err := provider.GetConfig(context.Background())
 	if err != nil || !cfg.Enabled {
 		t.Fatalf("first load failed: cfg=%+v err=%v", cfg, err)
 	}
 
-	// Force staleness; the refresh on the request must also see NotFound (the
-	// object vanished), and the cached enabled config is what gets served.
+	// A vanished AuthConfig must deny, not disable authentication or authorize
+	// against stale config. Cache failures to avoid hammering Kubernetes.
 	provider.lastFetch = time.Now().Add(-time.Hour)
 	provider.cacheDuration = time.Second
 	client := newFakeDynamic()
 	provider.dynamicClient = client
 
 	cfg2, err := provider.GetConfig(context.Background())
-	if err != nil {
-		t.Fatalf("stale cache + refresh NotFound must still serve previous config, got err=%v", err)
+	if cfg2 != nil || !errors.Is(err, ErrConfigUnavailable) {
+		t.Fatalf("refresh must fail closed: cfg=%+v err=%v", cfg2, err)
 	}
-	if !cfg2.Enabled {
-		t.Fatal("serving stale cache must not lose the enabled flag")
+	actions := len(client.Actions())
+	if cached, err := provider.GetConfig(context.Background()); cached != nil || !errors.Is(err, ErrConfigUnavailable) || len(client.Actions()) != actions {
+		t.Fatal("failure was not cached")
+	}
+	// Recover with a rotated key. The old key is retained for one session
+	// lifetime, including across an intervening configuration failure.
+	secret.Object["data"] = map[string]interface{}{"key": base64.StdEncoding.EncodeToString([]byte("new-key"))}
+	provider.dynamicClient = newFakeDynamic(config, secret)
+	provider.lastFetch = time.Now().Add(-time.Hour)
+	recovered, err := provider.GetConfig(context.Background())
+	if err != nil || string(recovered.SigningKey) != "new-key" || string(recovered.PreviousSigningKey) != "installation-key" {
+		t.Fatalf("rotation continuity lost: cfg=%+v err=%v", recovered, err)
+	}
+	oldToken := validToken([]byte("installation-key"), "user@example.com", "viewer")
+	if _, err := ValidateSessionTokenWithKeys(oldToken, recovered.SessionSigningKeys()); err != nil {
+		t.Fatalf("retired key should still work: %v", err)
+	}
+	provider.rotatedAt = time.Now().Add(-25 * time.Hour)
+	provider.lastFetch = time.Now().Add(-time.Hour)
+	expired, err := provider.GetConfig(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ValidateSessionTokenWithKeys(oldToken, expired.SessionSigningKeys()); err == nil {
+		t.Fatal("retired key remained usable after rotation grace period")
 	}
 }
 

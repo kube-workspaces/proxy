@@ -1,16 +1,15 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -42,13 +41,24 @@ var ErrConfigUnavailable = fmt.Errorf("auth config unavailable from cluster")
 
 // AuthConfig holds the resolved authentication configuration needed by the proxy.
 type AuthConfig struct {
-	Enabled     bool
-	SigningKey  []byte
-	AdminEmails []string
+	Enabled            bool
+	SigningKey         []byte
+	PreviousSigningKey []byte
+	TokenExpiry        time.Duration
+	AdminEmails        []string
+}
+
+func (c *AuthConfig) SessionSigningKeys() [][]byte {
+	keys := [][]byte{c.SigningKey}
+	if len(c.PreviousSigningKey) > 0 {
+		keys = append(keys, c.PreviousSigningKey)
+	}
+	return keys
 }
 
 // UserInfo represents the authenticated user's identity and access.
 type UserInfo struct {
+	UID               string
 	Email             string
 	DisplayName       string
 	Role              string
@@ -65,6 +75,8 @@ type ConfigProvider struct {
 	config        *AuthConfig
 	lastFetch     time.Time
 	cacheDuration time.Duration
+	lastError     error
+	rotatedAt     time.Time
 }
 
 // NewConfigProvider creates a new ConfigProvider with a 30-second cache.
@@ -75,31 +87,26 @@ func NewConfigProvider(dynamicClient dynamic.Interface) *ConfigProvider {
 	}
 }
 
-// GetConfig returns the current auth configuration, fetching from Kubernetes if the cache is stale.
 // GetConfig returns the current auth configuration, fetching from Kubernetes
-// if the cache is stale. A refresh failure serves the previously-loaded
-// config and triggers a background retry; only a first-load failure is fatal.
-// Failures must never change a working config into pass-through.
+// if the cache is stale. Like API, failed refreshes deny requests rather than
+// authorizing against stale (possibly disabled) configuration.
 func (p *ConfigProvider) GetConfig(ctx context.Context) (*AuthConfig, error) {
 	p.mu.RLock()
-	if p.config != nil && time.Since(p.lastFetch) < p.cacheDuration {
-		cfg := p.config
+	if !p.lastFetch.IsZero() && time.Since(p.lastFetch) < p.cacheDuration {
+		cfg, err := p.cachedResult()
 		p.mu.RUnlock()
-		return cfg, nil
-	}
-	if p.config != nil {
-		cfg := p.config
-		p.mu.RUnlock()
-		go func() {
-			if _, err := p.refresh(context.Background()); err != nil {
-				log.Printf("auth: refresh failed; serving cached config: %v", err)
-			}
-		}()
-		return cfg, nil
+		return cfg, err
 	}
 	p.mu.RUnlock()
 
 	return p.refresh(ctx)
+}
+
+func (p *ConfigProvider) cachedResult() (*AuthConfig, error) {
+	if p.lastError != nil {
+		return nil, p.lastError
+	}
+	return p.config, nil
 }
 
 func (p *ConfigProvider) refresh(ctx context.Context) (*AuthConfig, error) {
@@ -107,37 +114,54 @@ func (p *ConfigProvider) refresh(ctx context.Context) (*AuthConfig, error) {
 	defer p.mu.Unlock()
 
 	// Double-check after acquiring write lock
-	if p.config != nil && time.Since(p.lastFetch) < p.cacheDuration {
-		return p.config, nil
+	if !p.lastFetch.IsZero() && time.Since(p.lastFetch) < p.cacheDuration {
+		return p.cachedResult()
 	}
 
 	cfg, err := p.loadFromCluster(ctx)
+	p.lastFetch = time.Now()
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrConfigUnavailable, err)
+		p.lastError = fmt.Errorf("%w: %v", ErrConfigUnavailable, err)
+		return nil, p.lastError
+	}
+	p.lastError = nil
+	if p.config != nil {
+		switch {
+		case bytes.Equal(p.config.SigningKey, cfg.SigningKey):
+			if time.Since(p.rotatedAt) <= cfg.TokenExpiry {
+				cfg.PreviousSigningKey = p.config.PreviousSigningKey
+			}
+		case len(cfg.SigningKey) > 0:
+			cfg.PreviousSigningKey = p.config.SigningKey
+			p.rotatedAt = time.Now()
+		}
 	}
 	p.config = cfg
-	p.lastFetch = time.Now()
 	return cfg, nil
 }
 
 func (p *ConfigProvider) loadFromCluster(ctx context.Context) (*AuthConfig, error) {
 	obj, err := p.dynamicClient.Resource(authConfigGVR).Get(ctx, "default", metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		// No AuthConfig CR means auth genuinely disabled (opt-in).
-		return &AuthConfig{Enabled: false}, nil
-	}
 	if err != nil {
 		return nil, err
 	}
 
-	cfg := &AuthConfig{Enabled: false}
+	cfg := &AuthConfig{TokenExpiry: 24 * time.Hour}
 
 	// Parse spec.enabled
-	enabled, _, _ := unstructured.NestedBool(obj.Object, "spec", "enabled")
+	enabled, found, err := unstructured.NestedBool(obj.Object, "spec", "enabled")
+	if err != nil || !found {
+		return nil, fmt.Errorf("AuthConfig spec.enabled must be an explicit boolean")
+	}
 	cfg.Enabled = enabled
 
 	if !enabled {
 		return cfg, nil
+	}
+	if expiry, _, _ := unstructured.NestedString(obj.Object, "spec", "session", "tokenExpiry"); expiry != "" {
+		if duration, err := time.ParseDuration(expiry); err == nil {
+			cfg.TokenExpiry = duration
+		}
 	}
 
 	// Parse admin emails
@@ -147,12 +171,17 @@ func (p *ConfigProvider) loadFromCluster(ctx context.Context) (*AuthConfig, erro
 	// Load signing key from Secret
 	signingKeyRef, _, _ := unstructured.NestedString(obj.Object, "spec", "session", "signingKey", "name")
 	signingKeyKey, _, _ := unstructured.NestedString(obj.Object, "spec", "session", "signingKey", "key")
-	if signingKeyRef != "" && signingKeyKey != "" {
-		secret, err := p.getSecret(ctx, signingKeyRef, signingKeyKey)
-		if err == nil {
-			cfg.SigningKey = []byte(secret)
-		}
+	if signingKeyRef == "" || signingKeyKey == "" {
+		return nil, fmt.Errorf("auth is enabled but no session signing key secret is configured")
 	}
+	secret, err := p.getSecret(ctx, signingKeyRef, signingKeyKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load session signing key from secret %s/%s: %w", signingKeyRef, signingKeyKey, err)
+	}
+	if secret == "" {
+		return nil, fmt.Errorf("session signing key in secret %s/%s is empty", signingKeyRef, signingKeyKey)
+	}
+	cfg.SigningKey = []byte(secret)
 
 	return cfg, nil
 }
@@ -194,27 +223,25 @@ func (p *ConfigProvider) getSecret(ctx context.Context, name, key string) (strin
 // GetUserByEmail fetches a User CR by email address.
 // This is NOT cached — called on every request for instant revocation.
 func (p *ConfigProvider) GetUserByEmail(ctx context.Context, email string) (*UserInfo, error) {
-	// Try by slugified name first (faster than list)
-	slugName := slugifyEmail(email)
-	obj, err := p.dynamicClient.Resource(userGVR).Get(ctx, slugName, metav1.GetOptions{})
-	if err == nil {
-		userEmail, _, _ := unstructured.NestedString(obj.Object, "spec", "email")
-		if strings.EqualFold(userEmail, email) {
-			return extractUserInfo(obj)
-		}
-	}
-
-	// Fallback: list and filter (handles edge cases where slug doesn't match exactly)
+	// Match API semantics: exact email and exactly one current User. A slug
+	// shortcut would hide duplicate accounts and can resolve a different identity.
 	list, err := p.dynamicClient.Resource(userGVR).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list users: %w", err)
 	}
 
+	var matched *unstructured.Unstructured
 	for i := range list.Items {
 		userEmail, _, _ := unstructured.NestedString(list.Items[i].Object, "spec", "email")
-		if strings.EqualFold(userEmail, email) {
-			return extractUserInfo(&list.Items[i])
+		if userEmail == email {
+			if matched != nil {
+				return nil, fmt.Errorf("multiple user accounts match email")
+			}
+			matched = &list.Items[i]
 		}
+	}
+	if matched != nil {
+		return extractUserInfo(matched)
 	}
 	return nil, fmt.Errorf("user with email %s not found", email)
 }
@@ -222,12 +249,18 @@ func (p *ConfigProvider) GetUserByEmail(ctx context.Context, email string) (*Use
 func extractUserInfo(obj *unstructured.Unstructured) (*UserInfo, error) {
 	email, _, _ := unstructured.NestedString(obj.Object, "spec", "email")
 	displayName, _, _ := unstructured.NestedString(obj.Object, "spec", "displayName")
-	role, _, _ := unstructured.NestedString(obj.Object, "spec", "role")
+	role, _, roleErr := unstructured.NestedString(obj.Object, "spec", "role")
 	personalNS, _, _ := unstructured.NestedString(obj.Object, "status", "personalNamespace")
-	disabled, _, _ := unstructured.NestedBool(obj.Object, "spec", "disabled")
+	disabled, _, err := unstructured.NestedBool(obj.Object, "spec", "disabled")
 
-	if disabled {
-		return nil, fmt.Errorf("user account is disabled")
+	if obj.GetDeletionTimestamp() != nil {
+		return nil, fmt.Errorf("user account is being deleted")
+	}
+	if err != nil || disabled {
+		return nil, fmt.Errorf("user account is disabled or invalid")
+	}
+	if roleErr != nil || (role != "admin" && role != "editor" && role != "viewer") {
+		return nil, fmt.Errorf("current user role is invalid")
 	}
 
 	var namespaces []string
@@ -247,6 +280,7 @@ func extractUserInfo(obj *unstructured.Unstructured) (*UserInfo, error) {
 	}
 
 	return &UserInfo{
+		UID:               string(obj.GetUID()),
 		Email:             email,
 		DisplayName:       displayName,
 		Role:              role,

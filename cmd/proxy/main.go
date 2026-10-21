@@ -206,27 +206,6 @@ func main() {
 			return
 		}
 
-		// Escaped request recovery via Referer header.
-		// Only applies to sub-resource fetches (scripts, images, websockets, etc.)
-		// from within a workspace page. Skip for full-page navigations — when the
-		// browser navigates to a new top-level document (Accept: text/html as the
-		// first preference), the Referer is informational and must not cause the
-		// request to be routed into a workspace.
-		referer := r.Header.Get("Referer")
-		if referer != "" && !isTopLevelNavigation(r) {
-			proxyPrefix := proxy.ExtractProxyPrefix(referer, pathPrefix)
-			if proxyPrefix != "" {
-				// Validate the path segments look like K8s names before rewriting
-				trimmed := strings.TrimPrefix(proxyPrefix, pathPrefix+"/")
-				parts := strings.SplitN(trimmed, "/", 2)
-				if len(parts) >= 2 && isValidK8sName(parts[0]) && isValidK8sName(parts[1]) {
-					r.URL.Path = proxyPrefix + r.URL.Path
-					proxyHandler.ServeHTTP(w, r)
-					return
-				}
-			}
-		}
-
 		// Root path — simple info response
 		if r.URL.Path == "/" || r.URL.Path == "" {
 			w.Header().Set("Content-Type", "application/json")
@@ -238,9 +217,10 @@ func main() {
 		http.NotFound(w, r)
 	})
 
-	// Wrap with auth middleware, then CORS, then request logging
+	// Resolve escaped workspace paths before auth so namespace/role checks
+	// apply to the actual upstream target, including recovered root requests.
 	authedHandler := auth.Middleware(authProvider, pathPrefix)(rootHandler)
-	corsHandler := corsMiddleware(authedHandler, allowedOrigins)
+	corsHandler := corsMiddleware(recoverWorkspacePath(authedHandler, pathPrefix), allowedOrigins)
 	handler := requestLoggingMiddleware(corsHandler)
 
 	server := &http.Server{
@@ -274,6 +254,27 @@ func main() {
 		log.Fatalf("Server error: %v", err)
 	}
 	log.Println("Server stopped")
+}
+
+func recoverWorkspacePath(next http.Handler, pathPrefix string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		// Preserve explicit routes and full-page navigations. Only sub-resource
+		// requests may recover a workspace target from their Referer.
+		if !strings.HasPrefix(path, pathPrefix+"/") && path != "/healthz" && path != "/readyz" && path != "/version" && path != "/sw.js" && !isTopLevelNavigation(r) {
+			prefix := proxy.ExtractProxyPrefix(r.Header.Get("Referer"), pathPrefix)
+			parts := strings.SplitN(strings.TrimPrefix(prefix, pathPrefix+"/"), "/", 2)
+			if prefix != "" && len(parts) == 2 && isValidK8sName(parts[0]) && isValidK8sName(parts[1]) {
+				r = r.Clone(r.Context())
+				r.URL.Path = prefix + path
+				// RawPath must describe the same rewritten URL, not the old path.
+				if r.URL.RawPath != "" {
+					r.URL.RawPath = prefix + r.URL.RawPath
+				}
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // corsMiddleware adds CORS headers for allowed origins.

@@ -27,6 +27,7 @@ func Identity(ctx context.Context) string {
 type ConfigReader interface {
 	GetConfig(ctx context.Context) (*AuthConfig, error)
 	GetUserByEmail(ctx context.Context, email string) (*UserInfo, error)
+	ValidateDevice(ctx context.Context, token *SessionToken) error
 }
 
 // Middleware creates an HTTP middleware that validates session tokens and checks
@@ -68,7 +69,7 @@ func Middleware(provider ConfigReader, pathPrefix string) func(http.Handler) htt
 
 			// Get auth config — deny on unavailable state, never fail-open.
 			cfg, err := provider.GetConfig(ctx)
-			if err != nil {
+			if err != nil || cfg == nil {
 				log.Printf("auth: failed to get config: %v", err)
 				writeAuthError(w, http.StatusServiceUnavailable, "auth configuration unavailable")
 				return
@@ -98,21 +99,47 @@ func Middleware(provider ConfigReader, pathPrefix string) func(http.Handler) htt
 			}
 
 			// Validate the session token
-			token, err := ValidateSessionToken(tokenStr, cfg.SigningKey)
+			token, err := ValidateSessionTokenWithKeys(tokenStr, cfg.SessionSigningKeys())
 			if err != nil {
 				writeAuthError(w, http.StatusUnauthorized, err.Error())
 				return
 			}
 
-			// Check if user is in admin emails list (override role)
-			r = r.WithContext(context.WithValue(ctx, identityKey{}, token.Email))
-			role := token.Role
+			if token.Type == "device" {
+				if err := provider.ValidateDevice(ctx, token); err != nil {
+					writeAuthError(w, http.StatusUnauthorized, "device token is unavailable or revoked")
+					return
+				}
+			}
+			// Current account state is authoritative, including for token-admins
+			// and configured admin-email overrides. Preserve legacy UID-less
+			// sessions as API does, but bind new credentials to their User UID.
+			user, err := provider.GetUserByEmail(ctx, token.Email)
+			if err != nil || user == nil {
+				writeAuthError(w, http.StatusForbidden, "current user account unavailable")
+				return
+			}
+			if token.UserUID != "" && token.UserUID != user.UID {
+				writeAuthError(w, http.StatusUnauthorized, "session user identity no longer matches")
+				return
+			}
+			role := user.Role
+			if role != "admin" && role != "editor" && role != "viewer" {
+				writeAuthError(w, http.StatusForbidden, "current user role is invalid")
+				return
+			}
 			for _, adminEmail := range cfg.AdminEmails {
 				if strings.EqualFold(adminEmail, token.Email) {
 					role = "admin"
 					break
 				}
 			}
+			// Never mutate a provider-owned UserInfo (test/cache providers may
+			// reuse it). The override belongs only to this authorized request.
+			current := *user
+			current.Role = role
+			user = &current
+			r = r.WithContext(context.WithValue(ctx, identityKey{}, token.Email))
 
 			// Admins bypass namespace access checks
 			if role == "admin" {
@@ -128,22 +155,6 @@ func Middleware(provider ConfigReader, pathPrefix string) func(http.Handler) htt
 				next.ServeHTTP(w, r)
 				return
 			}
-
-			// Look up user's namespace access (not cached — instant revocation)
-			user, err := provider.GetUserByEmail(ctx, token.Email)
-			if err != nil {
-				// If user lookup fails, check if it's a "disabled" error
-				if strings.Contains(err.Error(), "disabled") {
-					writeAuthError(w, http.StatusForbidden, "user account is disabled")
-					return
-				}
-				// User not found in CRs — no namespace access
-				writeAuthError(w, http.StatusForbidden, "no access to namespace")
-				return
-			}
-
-			// Override role from token if admin emails matched
-			user.Role = role
 
 			// Check namespace access
 			if !UserHasNamespaceAccess(user, namespace) {

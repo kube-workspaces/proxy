@@ -167,6 +167,16 @@ func main() {
 		PathPrefix:           pathPrefix,
 		DisplayAPIURL:        os.Getenv("DISPLAY_API_URL"),
 		AgentAPIURL:          os.Getenv("AGENT_API_URL"),
+		// Long-lived proxied connections are revalidated against live account
+		// state, so a revoked credential ends the connection.
+		Revalidate: func(ctx context.Context) error {
+			token := auth.SessionFromContext(ctx)
+			if token == nil {
+				return nil
+			}
+			return authProvider.RevalidateCredential(ctx, token)
+		},
+		RevalidateInterval: credentialRevalidateInterval(),
 	})
 
 	// Root handler with routing and health check
@@ -254,6 +264,23 @@ func main() {
 		log.Fatalf("Server error: %v", err)
 	}
 	log.Println("Server stopped")
+}
+
+// credentialRevalidateInterval is how often an open connection revalidates the
+// credential that authorised it. It bounds how long a revoked credential can
+// keep a proxied connection alive. Operators can tune the window with
+// KW_CREDENTIAL_REVALIDATION_INTERVAL (for example "2s" or "30s").
+func credentialRevalidateInterval() time.Duration {
+	const fallback = 5 * time.Second
+	raw := strings.TrimSpace(os.Getenv("KW_CREDENTIAL_REVALIDATION_INTERVAL"))
+	if raw == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return fallback
+	}
+	return d
 }
 
 func recoverWorkspacePath(next http.Handler, pathPrefix string) http.Handler {

@@ -15,6 +15,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/kube-workspaces/proxy/internal/auth"
 	"github.com/kube-workspaces/proxy/internal/monitoring"
@@ -153,6 +154,12 @@ type HandlerOptions struct {
 	AgentDial         func(ctx context.Context, ns, name string, port int32) (net.Conn, error)
 	AgentOwner        string
 	AgentResolveOwner func(context.Context, string) (string, error)
+	// Revalidate re-checks the credential that authorised a long-lived
+	// connection (WebSocket upgrade or event stream). When it reports a revoked
+	// credential the connection is ended.
+	Revalidate func(context.Context) error
+	// RevalidateInterval is how often Revalidate runs for an open connection.
+	RevalidateInterval time.Duration
 }
 
 // Handler returns an http.Handler that proxies requests to workspace services.
@@ -193,6 +200,18 @@ func Handler(opts *HandlerOptions) http.Handler {
 		}
 		var session *monitoring.Session
 		sseRequested := strings.Contains(r.Header.Get("Accept"), "text/event-stream")
+		upgrade := strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
+		// A WebSocket upgrade or an event stream stays open after the
+		// handshake. End it when the credential that authorised it is revoked:
+		// cancelling the request context tears the proxied connection down.
+		if opts != nil && opts.Revalidate != nil && (upgrade || sseRequested) {
+			streamCtx, streamCancel := context.WithCancel(r.Context())
+			defer streamCancel()
+			r = r.WithContext(streamCtx)
+			defer auth.WatchCredentialRevocation(streamCtx, opts.Revalidate, opts.RevalidateInterval, func(string) {
+				streamCancel()
+			})()
+		}
 		if opts != nil && opts.Monitoring != nil {
 			m := monitoring.Metadata{Namespace: namespace, Name: name, Category: "http", Transport: "http", ByteLayer: "http_body", User: auth.Identity(r.Context())}
 			if opts.WorkspaceInfoLookup != nil {
@@ -201,7 +220,6 @@ func Handler(opts *HandlerOptions) http.Handler {
 					m.WorkspaceType = info.Type
 				}
 			}
-			upgrade := strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
 			if sseRequested {
 				m.Category = "application"
 				m.Transport = "sse"

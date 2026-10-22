@@ -15,10 +15,21 @@ const (
 
 type identityKey struct{}
 
+// sessionKey carries the validated session token so a long-lived connection
+// can revalidate its credential while it stays open.
+type sessionKey struct{}
+
 // Identity is populated only after validating the platform session token.
 func Identity(ctx context.Context) string {
 	email, _ := ctx.Value(identityKey{}).(string)
 	return email
+}
+
+// SessionFromContext returns the session token validated for the request.
+// Returns nil when the request carried no credential.
+func SessionFromContext(ctx context.Context) *SessionToken {
+	token, _ := ctx.Value(sessionKey{}).(*SessionToken)
+	return token
 }
 
 // ConfigReader abstracts the auth configuration and user lookups the
@@ -158,6 +169,7 @@ func Middleware(provider ConfigReader, pathPrefix string) func(http.Handler) htt
 			current.Role = role
 			user = &current
 			r = r.WithContext(context.WithValue(ctx, identityKey{}, token.Email))
+			r = r.WithContext(context.WithValue(r.Context(), sessionKey{}, token))
 
 			// Admins bypass namespace access checks
 			if role == "admin" {

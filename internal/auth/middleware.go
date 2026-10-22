@@ -28,6 +28,7 @@ type ConfigReader interface {
 	GetConfig(ctx context.Context) (*AuthConfig, error)
 	GetUserByEmail(ctx context.Context, email string) (*UserInfo, error)
 	ValidateDevice(ctx context.Context, token *SessionToken) error
+	ValidateProvenance(ctx context.Context, token *SessionToken, user *UserInfo) (bool, error)
 }
 
 // Middleware creates an HTTP middleware that validates session tokens and checks
@@ -104,6 +105,10 @@ func Middleware(provider ConfigReader, pathPrefix string) func(http.Handler) htt
 				writeAuthError(w, http.StatusUnauthorized, err.Error())
 				return
 			}
+			if (token.Type != "" && token.Type != "device") || (token.Type == "device" && token.JTI == "") || (token.Type == "" && token.JTI != "") {
+				writeAuthError(w, http.StatusUnauthorized, "invalid credential type")
+				return
+			}
 
 			if token.Type == "device" {
 				if err := provider.ValidateDevice(ctx, token); err != nil {
@@ -121,6 +126,19 @@ func Middleware(provider ConfigReader, pathPrefix string) func(http.Handler) htt
 			}
 			if token.UserUID != "" && token.UserUID != user.UID {
 				writeAuthError(w, http.StatusUnauthorized, "session user identity no longer matches")
+				return
+			}
+			if token.UserUID == "" || token.CredentialVersion == "" || (token.AuthMethod != "local" && token.AuthMethod != "oidc") {
+				writeAuthError(w, http.StatusUnauthorized, "fresh sign-in required for method-bound credentials")
+				return
+			}
+			restricted, err := provider.ValidateProvenance(ctx, token, user)
+			if err != nil {
+				writeAuthError(w, http.StatusUnauthorized, "credential unavailable or revoked")
+				return
+			}
+			if restricted {
+				writeAuthError(w, http.StatusForbidden, "password_change_required: change your temporary password before accessing workspaces")
 				return
 			}
 			role := user.Role

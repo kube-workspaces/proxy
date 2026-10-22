@@ -57,12 +57,15 @@ func (routingAuthProvider) GetConfig(context.Context) (*auth.AuthConfig, error) 
 	return &auth.AuthConfig{Enabled: true, SigningKey: []byte("routing-key")}, nil
 }
 func (routingAuthProvider) GetUserByEmail(context.Context, string) (*auth.UserInfo, error) {
-	return &auth.UserInfo{Email: "user@example.com", Role: "viewer", PersonalNamespace: "allowed"}, nil
+	return &auth.UserInfo{UID: "routing-uid", Email: "user@example.com", Role: "viewer", PersonalNamespace: "allowed"}, nil
 }
 func (routingAuthProvider) ValidateDevice(context.Context, *auth.SessionToken) error { return nil }
+func (routingAuthProvider) ValidateProvenance(context.Context, *auth.SessionToken, *auth.UserInfo) (bool, error) {
+	return false, nil
+}
 
 func TestRecoveredPathsAreAuthorizedBeforeDispatch(t *testing.T) {
-	payload, err := json.Marshal(auth.SessionToken{Email: "user@example.com", Role: "editor", ExpiresAt: time.Now().Add(time.Hour).Unix()})
+	payload, err := json.Marshal(auth.SessionToken{UserUID: "routing-uid", AuthMethod: "local", CredentialVersion: "routing-version", Email: "user@example.com", Role: "editor", ExpiresAt: time.Now().Add(time.Hour).Unix()})
 	if err != nil {
 		t.Fatal(err)
 	}

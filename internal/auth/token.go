@@ -15,15 +15,19 @@ import (
 
 // SessionToken represents the payload of a kw-session token.
 type SessionToken struct {
-	UserUID     string   `json:"user_uid,omitempty"`
-	Type        string   `json:"typ,omitempty"`
-	JTI         string   `json:"jti,omitempty"`
-	Email       string   `json:"email"`
-	DisplayName string   `json:"displayName,omitempty"`
-	Role        string   `json:"role"`
-	Groups      []string `json:"groups,omitempty"`
-	IssuedAt    int64    `json:"iat"`
-	ExpiresAt   int64    `json:"exp"`
+	AuthMethod        string   `json:"auth_method,omitempty"`
+	CredentialVersion string   `json:"credential_version,omitempty"`
+	Issuer            string   `json:"issuer,omitempty"`
+	Subject           string   `json:"subject,omitempty"`
+	UserUID           string   `json:"user_uid,omitempty"`
+	Type              string   `json:"typ,omitempty"`
+	JTI               string   `json:"jti,omitempty"`
+	Email             string   `json:"email"`
+	DisplayName       string   `json:"displayName,omitempty"`
+	Role              string   `json:"role"`
+	Groups            []string `json:"groups,omitempty"`
+	IssuedAt          int64    `json:"iat"`
+	ExpiresAt         int64    `json:"exp"`
 }
 
 // ValidateSessionToken validates and decodes a session token.

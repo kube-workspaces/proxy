@@ -58,6 +58,7 @@ func (c *AuthConfig) SessionSigningKeys() [][]byte {
 
 // UserInfo represents the authenticated user's identity and access.
 type UserInfo struct {
+	record            *unstructured.Unstructured
 	UID               string
 	Email             string
 	DisplayName       string
@@ -280,6 +281,7 @@ func extractUserInfo(obj *unstructured.Unstructured) (*UserInfo, error) {
 	}
 
 	return &UserInfo{
+		record:            obj,
 		UID:               string(obj.GetUID()),
 		Email:             email,
 		DisplayName:       displayName,

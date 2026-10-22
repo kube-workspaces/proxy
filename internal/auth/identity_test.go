@@ -18,8 +18,15 @@ func currentUser() *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "kubeworkspaces.io/v1alpha1", "kind": "User",
 		"metadata": map[string]interface{}{"name": "user", "uid": "current-uid"},
-		"spec":     map[string]interface{}{"email": "user@example.com", "role": "editor"},
+		"spec":     map[string]interface{}{"email": "user@example.com", "role": "editor", "localAuth": map[string]interface{}{"enabled": true, "passwordSecretRef": map[string]interface{}{"name": "password", "key": "passwordHash"}}},
 		"status":   map[string]interface{}{"personalNamespace": "personal"},
+	}}
+}
+
+func currentPassword() *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "v1", "kind": "Secret", "metadata": map[string]interface{}{"name": "password", "namespace": deviceNamespace},
+		"data": map[string]interface{}{"passwordHash": base64.StdEncoding.EncodeToString([]byte("test-hash"))},
 	}}
 }
 
@@ -32,7 +39,7 @@ func TestCurrentAccountEnforcedBeforeAdminBypass(t *testing.T) {
 		want                         int
 	}{
 		{name: "bound account", uid: "current-uid", want: 200},
-		{name: "legacy unbound account", want: 200},
+		{name: "legacy unbound account", want: 401},
 		{name: "replacement account", uid: "old-uid", want: 401},
 		{name: "missing token admin", missing: true, want: 403},
 		{name: "missing override admin", missing: true, override: true, want: 403},
@@ -56,7 +63,7 @@ func TestCurrentAccountEnforcedBeforeAdminBypass(t *testing.T) {
 			if tt.mutate != nil {
 				tt.mutate(user)
 			}
-			var objs []runtime.Object
+			objs := []runtime.Object{currentPassword()}
 			if !tt.missing {
 				objs = append(objs, user)
 			}
@@ -73,7 +80,7 @@ func TestCurrentAccountEnforcedBeforeAdminBypass(t *testing.T) {
 			}
 			provider := NewConfigProvider(newFakeDynamic(objs...))
 			provider.config, provider.lastFetch = cfg, time.Now()
-			token := signPayload(key, SessionToken{Email: "user@example.com", Role: "admin", UserUID: tt.uid, ExpiresAt: time.Now().Add(time.Hour).Unix()})
+			token := signPayload(key, SessionToken{AuthMethod: "local", CredentialVersion: localCredentialVersion("current-uid", "password", "passwordHash", "test-hash"), Email: "user@example.com", Role: "admin", UserUID: tt.uid, ExpiresAt: time.Now().Add(time.Hour).Unix()})
 			if got := doRequest(t, provider, "/proxy/personal/workspace/", "Bearer "+token); got != tt.want {
 				t.Fatalf("status=%d, want %d", got, tt.want)
 			}
@@ -117,7 +124,7 @@ func TestDeviceRegistrationRequiredAtProxy(t *testing.T) {
 				"apiVersion": "v1", "kind": "Secret",
 				"metadata": map[string]interface{}{"name": "kw-device-device-id", "namespace": deviceNamespace}, field: data,
 			}}
-			objs := []runtime.Object{currentUser()}
+			objs := []runtime.Object{currentUser(), currentPassword()}
 			if !tt.missing {
 				objs = append(objs, secret)
 			}
@@ -126,7 +133,7 @@ func TestDeviceRegistrationRequiredAtProxy(t *testing.T) {
 			key := []byte("test-key")
 			provider.config = &AuthConfig{Enabled: true, SigningKey: key, AdminEmails: []string{"user@example.com"}}
 			provider.lastFetch = time.Now()
-			token := signPayload(key, SessionToken{Email: "user@example.com", Role: "admin", UserUID: "current-uid", Type: "device", JTI: "device-id", ExpiresAt: time.Now().Add(time.Hour).Unix()})
+			token := signPayload(key, SessionToken{AuthMethod: "local", CredentialVersion: localCredentialVersion("current-uid", "password", "passwordHash", "test-hash"), Email: "user@example.com", Role: "admin", UserUID: "current-uid", Type: "device", JTI: "device-id", ExpiresAt: time.Now().Add(time.Hour).Unix()})
 			// Use a cookie here as well as Bearer to cover browser-session handoff.
 			req := httptest.NewRequest("GET", "/proxy/personal/workspace/", nil)
 			req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: token})

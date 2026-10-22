@@ -24,6 +24,10 @@ func (m *mockProvider) ValidateDevice(context.Context, *SessionToken) error {
 	return m.deviceErr
 }
 
+func (m *mockProvider) ValidateProvenance(context.Context, *SessionToken, *UserInfo) (bool, error) {
+	return false, nil
+}
+
 func (m *mockProvider) GetConfig(ctx context.Context) (*AuthConfig, error) {
 	return m.config, nil
 }
@@ -33,9 +37,13 @@ func (m *mockProvider) GetUserByEmail(ctx context.Context, email string) (*UserI
 		return nil, m.userErr
 	}
 	if m.user == nil {
-		return &UserInfo{Email: email, Role: "viewer"}, nil
+		return &UserInfo{UID: "test-uid", Email: email, Role: "viewer"}, nil
 	}
-	return m.user, nil
+	user := *m.user
+	if user.UID == "" {
+		user.UID = "test-uid"
+	}
+	return &user, nil
 }
 
 func TestIsRestrictedPath(t *testing.T) {
@@ -71,6 +79,7 @@ func signPayload(key []byte, token SessionToken) string {
 
 func validToken(key []byte, email, role string) string {
 	return signPayload(key, SessionToken{
+		UserUID: "test-uid", AuthMethod: "local", CredentialVersion: "test-version",
 		Email:     email,
 		Role:      role,
 		IssuedAt:  time.Now().Unix(),

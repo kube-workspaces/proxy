@@ -53,6 +53,13 @@ func TestMonitoringHTTPBodiesAndWebSocketTraffic(t *testing.T) {
 		t.Fatalf("body %q", body)
 	}
 	snap := reg.Snapshot()
+	// Reading EOF on the HTTP body can precede the server handler's deferred
+	// session cleanup, especially under race/coverage instrumentation.
+	httpDeadline := time.Now().Add(time.Second)
+	for len(snap.Connections) != 0 && time.Now().Before(httpDeadline) {
+		time.Sleep(time.Millisecond)
+		snap = reg.Snapshot()
+	}
 	if len(snap.Connections) != 0 || len(snap.Traffic) != 1 || snap.Traffic[0].ToWorkspace != 7 || snap.Traffic[0].ToClient != 7 {
 		t.Fatalf("HTTP body accounting: %+v", snap)
 	}

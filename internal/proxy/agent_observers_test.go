@@ -23,6 +23,38 @@ func observerTestBridge() *agentBridge {
 
 var observerTestIDR = []byte{0, 0, 0, 1, 0x67, 1, 0, 0, 1, 0x68, 2, 0, 0, 1, 0x65, 3}
 
+func TestObserverVideoFactsAreLiveAndWhitelisted(t *testing.T) {
+	b := observerTestBridge()
+	o, _, err := b.subscribe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.unsubscribe(o)
+	b.publish(agentWire(1, observerTestIDR))
+	<-o.queue
+	b.publish(agentWire(0, []byte(`{"type":"telemetry","payload":{"session":{"private":"controller"},"video":{"capture":{"backend":"DXGI","adapter":"Example GPU","software":false,"private":"secret"},"encoder":{"name":"Software encoder","hardware":false}}}}`)))
+	select {
+	case frame := <-o.queue:
+		if strings.Contains(string(frame), "private") || strings.Contains(string(frame), "secret") || !strings.Contains(string(frame), "Example GPU") {
+			t.Fatalf("unsafe or missing video facts: %s", frame[5:])
+		}
+	default:
+		t.Fatal("video telemetry did not reach observer")
+	}
+	b.publish(agentWire(0, []byte(`{"type":"telemetry","payload":{"video":null}}`)))
+	late, hello, err := b.subscribe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.unsubscribe(late)
+	var envelope struct {
+		Payload map[string]any `json:"payload"`
+	}
+	if json.Unmarshal(hello[5:], &envelope) != nil || envelope.Payload["video"] != nil {
+		t.Fatalf("late observer received stale facts: %s", hello[5:])
+	}
+}
+
 func TestAgentFanoutBootstrapIsolationAndBounds(t *testing.T) {
 	b := observerTestBridge()
 	o, hello, err := b.subscribe()

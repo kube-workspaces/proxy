@@ -98,6 +98,7 @@ func nalType(unit []byte) byte {
 
 // publish is called only by the guest reader, before writing to the controller.
 // Never forward clipboard results, tickets or controller-specific telemetry.
+// Video-backend facts are shared display state and are separately whitelisted.
 func (b *agentBridge) publish(frame []byte) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -109,8 +110,9 @@ func (b *agentBridge) publish(frame []byte) {
 		var msg struct {
 			Type    string `json:"type"`
 			Payload struct {
-				Admitted bool           `json:"admitted"`
-				Actual   map[string]any `json:"actual"`
+				Admitted bool            `json:"admitted"`
+				Actual   map[string]any  `json:"actual"`
+				Video    json.RawMessage `json:"video"`
 			} `json:"payload"`
 		}
 		if json.Unmarshal(frame[5:], &msg) != nil {
@@ -123,6 +125,29 @@ func (b *agentBridge) publish(frame []byte) {
 		case "attachResult":
 			b.admitted = msg.Payload.Admitted
 			return
+		case "telemetry":
+			if len(msg.Payload.Video) == 0 {
+				return
+			}
+			var video *agentVideoFacts
+			if json.Unmarshal(msg.Payload.Video, &video) != nil {
+				return
+			}
+			var hello map[string]any
+			if len(b.helloFrame) > 5 && json.Unmarshal(b.helloFrame[5:], &hello) == nil {
+				if payload, ok := hello["payload"].(map[string]any); ok {
+					payload["video"] = video
+					raw, _ := json.Marshal(hello)
+					b.helloFrame = agentWire(0, raw)
+				}
+			}
+			var envelope map[string]any
+			if json.Unmarshal(frame[5:], &envelope) != nil {
+				return
+			}
+			envelope["payload"] = map[string]any{"video": video}
+			raw, _ := json.Marshal(envelope)
+			frame = agentWire(0, raw)
 		case "resizeAck": // Mode is shared state; every observer needs it.
 			if len(msg.Payload.Actual) > 0 {
 				var hello map[string]any

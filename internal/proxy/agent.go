@@ -85,6 +85,21 @@ func (r *agentRegistry) release(ns, name string, bridge *agentBridge) {
 	}
 }
 
+// replaceHelper reserves the single upstream for an already-authorized display
+// claim. Reconnecting helpers cannot race into the gap during old teardown.
+// A display bridge (including legacy bridges with no purpose) is never replaced.
+func (r *agentRegistry) replaceHelper(ns, name string, bridge *agentBridge) (*agentBridge, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key := r.key(ns, name)
+	old := r.sessions[key]
+	if old == nil || (old.purpose != "telemetry" && old.purpose != "clipboard") || old.cancel == nil {
+		return nil, false
+	}
+	r.sessions[key] = bridge
+	return old, true
+}
+
 // Disconnect reasons recorded on the bridge snapshot (Layer 2 of the
 // transport indicator contract). They describe how the session ended, never
 // user content.
@@ -125,6 +140,9 @@ func (s agentSnapshot) MediaBytes() int64 { return s.MediaToGuest + s.MediaToVie
 // the indicator contract requires (API/proxy/client/guest must agree on
 // usage). Both copy goroutines update it; readers take Snapshot.
 type agentBridge struct {
+	// Set before publication in the registry; immutable afterward.
+	purpose             string
+	cancel              context.CancelFunc
 	mu                  sync.Mutex
 	attachedAt          time.Time
 	endedAt             time.Time
@@ -495,18 +513,50 @@ func serveAgent(deps *agentDeps, w http.ResponseWriter, r *http.Request, ns, nam
 		return
 	}
 	registry := deps.registry()
-	bridge := newAgentBridge(time.Now())
-	if !registry.tryHold(ns, name, bridge) {
-		http.Error(w, `{"error":"agent session busy"}`, http.StatusConflict)
-		return
-	}
-	defer registry.release(ns, name, bridge)
-	defer close(bridge.done)
-
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
+	bridge := newAgentBridge(time.Now())
+	bridge.purpose, bridge.cancel = purpose, cancel
+	defer registry.release(ns, name, bridge)
+	defer close(bridge.done)
 	var claim *displayClaim
-	if purpose == "display" {
+	if !registry.tryHold(ns, name, bridge) {
+		if purpose != "display" {
+			http.Error(w, `{"error":"agent session busy"}`, http.StatusConflict)
+			return
+		}
+		// Authority precedes helper cancellation. An unauthorized or busy
+		// display request must not disconnect an admitted helper.
+		headers := r.Header.Clone()
+		headers.Set("X-KW-Display-Transport", "agent")
+		headers.Set("X-KW-Agent-Owner", deps.Owner)
+		var status int
+		var err error
+		claim, status, err = acquireDisplay(ctx, deps.API, ns, name, headers, cancel)
+		if err != nil {
+			http.Error(w, "interactive display claim refused", status)
+			return
+		}
+		defer claim.close()
+		old, replaced := registry.replaceHelper(ns, name, bridge)
+		if !replaced {
+			http.Error(w, `{"error":"agent session busy"}`, http.StatusConflict)
+			return
+		}
+		old.cancel()
+		timer := time.NewTimer(5 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-old.done:
+		case <-ctx.Done():
+			http.Error(w, "display request cancelled", http.StatusServiceUnavailable)
+			return
+		case <-timer.C:
+			http.Error(w, "agent helper teardown timed out", http.StatusServiceUnavailable)
+			return
+		}
+	}
+	if purpose == "display" && claim == nil {
 		var status int
 		var err error
 		headers := r.Header.Clone()

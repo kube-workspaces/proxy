@@ -104,7 +104,10 @@ func (a *agentAdmission) viewerFrame(frame []byte) ([]byte, error) {
 		if a.attached || (a.purpose == "telemetry" && !a.controlOnly) {
 			return nil, errors.New("agent purpose unavailable or duplicate attach")
 		}
-		payload := map[string]any{"ticket": a.grant}
+		// Only a seat-authorized display may isolate the virtual monitor. In
+		// particular, legacy clipboard helpers still use interactive admission;
+		// their connection must never detach the console they are supporting.
+		payload := map[string]any{"ticket": a.grant, "displaySession": a.purpose == "display"}
 		a.grant["sessionId"] = a.session
 		if a.purpose == "telemetry" {
 			payload["controlOnly"] = true

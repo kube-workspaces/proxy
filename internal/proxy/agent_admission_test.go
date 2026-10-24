@@ -15,14 +15,15 @@ func TestAgentAuthorityAndPurpose(t *testing.T) {
 		t.Run(purpose, func(t *testing.T) {
 			a := &agentAdmission{purpose: purpose, grant: map[string]any{"workspaceUid": "real-workspace", "controlEpoch": 1}}
 			a.observe([]byte(`{"type":"hello","sessionId":"guest-session","payload":{"controlOnlyAvailable":true}}`))
-			out, err := a.viewerFrame(admissionFrame("attach", map[string]any{"ticket": map[string]any{"workspaceUid": "forged"}, "controlOnly": false}))
+			out, err := a.viewerFrame(admissionFrame("attach", map[string]any{"ticket": map[string]any{"workspaceUid": "forged"}, "controlOnly": false, "displaySession": purpose != "display"}))
 			if err != nil {
 				t.Fatal(err)
 			}
 			var envelope struct {
 				Payload struct {
-					Ticket      map[string]any
-					ControlOnly bool
+					Ticket         map[string]any
+					ControlOnly    bool
+					DisplaySession bool
 				}
 			}
 			if err := json.Unmarshal(out[5:], &envelope); err != nil {
@@ -30,6 +31,9 @@ func TestAgentAuthorityAndPurpose(t *testing.T) {
 			}
 			if envelope.Payload.Ticket["workspaceUid"] != "real-workspace" || envelope.Payload.Ticket["sessionId"] != "guest-session" || envelope.Payload.ControlOnly != (purpose == "telemetry") {
 				t.Fatalf("bad authority: %s", out[5:])
+			}
+			if envelope.Payload.DisplaySession != (purpose == "display") {
+				t.Fatalf("viewer forged display topology intent: %s", out[5:])
 			}
 			if _, err := a.viewerFrame(admissionFrame("attach", nil)); err == nil {
 				t.Fatal("duplicate attach accepted")

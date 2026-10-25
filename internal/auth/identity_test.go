@@ -30,6 +30,34 @@ func currentPassword() *unstructured.Unstructured {
 	}}
 }
 
+func TestPasswordOwnershipEnforcedAtProxy(t *testing.T) {
+	for _, mode := range []string{"legacy", "owned", "wrong-uid", "wrong-owner-reference"} {
+		t.Run(mode, func(t *testing.T) {
+			secret := currentPassword()
+			if mode != "legacy" {
+				secret.SetAnnotations(map[string]string{"kubeworkspaces.io/user-uid": "current-uid"})
+			}
+			if mode == "wrong-uid" {
+				secret.SetAnnotations(map[string]string{"kubeworkspaces.io/user-uid": "other-uid"})
+			}
+			if mode == "wrong-owner-reference" {
+				secret.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: "kubeworkspaces.io/v1alpha1", Kind: "User", Name: "user", UID: "other-uid"}})
+			}
+			key := []byte("test-key")
+			provider := NewConfigProvider(newFakeDynamic(currentUser(), secret))
+			provider.config, provider.lastFetch = &AuthConfig{Enabled: true, SigningKey: key}, time.Now()
+			token := signPayload(key, SessionToken{AuthMethod: "local", CredentialVersion: localCredentialVersion("current-uid", "password", "passwordHash", "test-hash"), Email: "user@example.com", Role: "admin", UserUID: "current-uid", ExpiresAt: time.Now().Add(time.Hour).Unix()})
+			want := http.StatusOK
+			if mode == "wrong-uid" || mode == "wrong-owner-reference" {
+				want = http.StatusUnauthorized
+			}
+			if got := doRequest(t, provider, "/proxy/personal/workspace/", "Bearer "+token); got != want {
+				t.Fatalf("ownership status %d, want %d", got, want)
+			}
+		})
+	}
+}
+
 func TestCurrentAccountEnforcedBeforeAdminBypass(t *testing.T) {
 	for _, tt := range []struct {
 		name                         string

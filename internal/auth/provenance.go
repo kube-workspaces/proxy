@@ -72,6 +72,14 @@ func (p *ConfigProvider) ValidateProvenance(ctx context.Context, token *SessionT
 		if secret.GetDeletionTimestamp() != nil {
 			return false, fmt.Errorf("password credential deleting")
 		}
+		if uid := secret.GetAnnotations()["kubeworkspaces.io/user-uid"]; uid != "" && uid != user.UID {
+			return false, fmt.Errorf("password credential belongs to a different User UID")
+		}
+		for _, owner := range secret.GetOwnerReferences() {
+			if owner.Kind == "User" && (string(owner.UID) != user.UID || owner.Name != user.record.GetName() || owner.APIVersion != "kubeworkspaces.io/v1alpha1") {
+				return false, fmt.Errorf("password credential owner reference mismatch")
+			}
+		}
 		hash, found, err := secretDataValue(secret, key)
 		if err != nil || !found || hash == "" || token.CredentialVersion != localCredentialVersion(user.UID, name, key, hash) {
 			return false, fmt.Errorf("local credential revoked")

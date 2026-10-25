@@ -144,7 +144,7 @@ type HandlerOptions struct {
 	// Default is "/proxy" (routes are /proxy/{ns}/{name}/...).
 	PathPrefix string
 	// DisplayAPIURL is a trusted operator-configured API origin, never metadata
-	// or an incoming Host header. Required for the Selkies interactive socket.
+	// or an incoming Host header. Required for VM Selkies interactive sockets.
 	DisplayAPIURL string
 	// AgentAPIURL is the trusted operator-configured API origin for agent
 	// ticket attach/renew/release. Required for the /agent/ bridge.
@@ -300,7 +300,16 @@ func Handler(opts *HandlerOptions) http.Handler {
 			return
 		}
 		var claim *displayClaim
-		if strings.HasSuffix(rest, "/api/websockets") {
+		// Container Selkies displays do not compete for a KubeVirt console or
+		// VM interactive seat. Only skip ownership for a confirmed container;
+		// unknown metadata must not bypass the VM ownership guard.
+		containerDisplay := false
+		if strings.HasSuffix(rest, "/api/websockets") && opts != nil && opts.WorkspaceInfoLookup != nil {
+			if info := opts.WorkspaceInfoLookup(namespace, name); info != nil {
+				containerDisplay = info.Type == "container"
+			}
+		}
+		if strings.HasSuffix(rest, "/api/websockets") && !containerDisplay {
 			if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 				http.Error(w, "WebSocket upgrade required", http.StatusUpgradeRequired)
 				return

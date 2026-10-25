@@ -12,7 +12,70 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"golang.org/x/net/websocket"
 )
+
+func TestSelkiesOwnershipByWorkspaceType(t *testing.T) {
+	for _, kind := range []string{"container", "vm", "unknown"} {
+		t.Run(kind, func(t *testing.T) {
+			// The real API refuses container claims. A container socket must
+			// reach its guest without calling the VM-only ownership service.
+			var claims atomic.Int32
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				claims.Add(1)
+				http.Error(w, "Tier 1 is only available for VM workspaces", http.StatusBadRequest)
+			}))
+			defer api.Close()
+			guest := httptest.NewServer(websocket.Handler(func(c *websocket.Conn) {
+				var message string
+				if err := websocket.Message.Receive(c, &message); err == nil {
+					_ = websocket.Message.Send(c, message)
+				}
+			}))
+			defer guest.Close()
+			srv := httptest.NewServer(Handler(&HandlerOptions{
+				PathPrefix: "/proxy", DisplayAPIURL: api.URL,
+				WorkspaceInfoLookup: func(string, string) *WorkspaceInfo {
+					if kind == "unknown" {
+						return nil
+					}
+					return &WorkspaceInfo{Type: kind}
+				},
+				BackendDial: func(ctx context.Context, network, address string) (net.Conn, error) {
+					return (&net.Dialer{}).DialContext(ctx, network, strings.TrimPrefix(guest.URL, "http://"))
+				},
+			}))
+			defer srv.Close()
+			c, err := websocket.Dial("ws"+strings.TrimPrefix(srv.URL, "http")+"/proxy/ns/desktop/api/websockets", "", "http://test")
+			if kind != "container" {
+				if err == nil {
+					c.Close()
+					t.Fatal("socket bypassed refused VM ownership claim")
+				}
+				if claims.Load() != 1 {
+					t.Fatalf("claims=%d, want 1", claims.Load())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer c.Close()
+			_ = c.SetDeadline(time.Now().Add(2 * time.Second))
+			if err := websocket.Message.Send(c, "display"); err != nil {
+				t.Fatal(err)
+			}
+			var reply string
+			if err := websocket.Message.Receive(c, &reply); err != nil || reply != "display" {
+				t.Fatalf("guest echo=%q, err=%v", reply, err)
+			}
+			if claims.Load() != 0 {
+				t.Fatalf("container made %d VM ownership requests", claims.Load())
+			}
+		})
+	}
+}
 
 func testClaimID() string { return strings.Repeat("ab", 32) }
 
